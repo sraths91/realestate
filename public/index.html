@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PropScout &mdash; Real Estate Analytics</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===== HEADER ===== -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none"><path d="M16 2L2 14h4v14h8v-8h4v8h8V14h4L16 2z" fill="currentColor"/></svg>
+        <span>PropScout</span>
+      </div>
+      <nav class="tab-nav">
+        <button class="tab-btn active" data-tab="search">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          Search
+        </button>
+        <button class="tab-btn" data-tab="scanner">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/><path d="M8 12h8M12 8v8"/></svg>
+          Scanner
+        </button>
+        <button class="tab-btn" data-tab="map">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          Map
+        </button>
+        <button class="tab-btn" data-tab="analytics">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+          Analytics
+        </button>
+      </nav>
+      <div class="api-status" id="api-status">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== MAIN CONTENT ===== -->
+  <main class="app-main">
+
+    <!-- TAB: SEARCH -->
+    <section class="tab-panel active" id="tab-search">
+      <div class="search-hero">
+        <h1>Find Your Next Property</h1>
+        <p>Enter an address to get instant valuations, comparables, and market data</p>
+        <div class="search-bar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="search-input" placeholder="123 Main St, City, State" autocomplete="off" />
+          <button id="search-btn" class="btn btn-primary">Search</button>
+        </div>
+        <div id="search-suggestions" class="suggestions-dropdown"></div>
+      </div>
+
+      <!-- Property Results -->
+      <div id="search-results" class="results-container hidden">
+        <!-- Property Card -->
+        <div class="result-grid">
+          <div class="property-card main-card" id="property-card">
+            <div class="card-header">
+              <h2 id="prop-address">--</h2>
+              <span class="badge badge-blue" id="prop-type">--</span>
+            </div>
+            <div class="card-body">
+              <div class="stat-row">
+                <div class="stat">
+                  <span class="stat-label">Bedrooms</span>
+                  <span class="stat-value" id="prop-beds">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Bathrooms</span>
+                  <span class="stat-value" id="prop-baths">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Sq Ft</span>
+                  <span class="stat-value" id="prop-sqft">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Lot Size</span>
+                  <span class="stat-value" id="prop-lot">--</span>
+                </div>
+              </div>
+              <div class="stat-row">
+                <div class="stat">
+                  <span class="stat-label">Year Built</span>
+                  <span class="stat-value" id="prop-year">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Last Sale</span>
+                  <span class="stat-value" id="prop-last-sale">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Last Sale Price</span>
+                  <span class="stat-value" id="prop-last-price">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Tax Assessment</span>
+                  <span class="stat-value" id="prop-tax">--</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Valuation Card -->
+          <div class="property-card valuation-card" id="valuation-card">
+            <div class="card-header">
+              <h2>Estimated Value</h2>
+              <span class="badge badge-green">AVM</span>
+            </div>
+            <div class="card-body">
+              <div class="big-number" id="val-estimate">--</div>
+              <div class="val-range">
+                <span>Low: <strong id="val-low">--</strong></span>
+                <span>High: <strong id="val-high">--</strong></span>
+              </div>
+              <div class="val-divider"></div>
+              <div class="stat-row">
+                <div class="stat">
+                  <span class="stat-label">Price / Sq Ft</span>
+                  <span class="stat-value" id="val-ppsf">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Rent Estimate</span>
+                  <span class="stat-value" id="val-rent">--</span>
+                </div>
+              </div>
+              <div class="stat-row">
+                <div class="stat">
+                  <span class="stat-label">Cap Rate</span>
+                  <span class="stat-value" id="val-cap">--</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Gross Yield</span>
+                  <span class="stat-value" id="val-yield">--</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Comparables -->
+        <div class="section-header">
+          <h2>Comparable Properties</h2>
+          <p>Similar homes used to derive the valuation estimate</p>
+        </div>
+        <div class="comps-grid" id="comps-grid"></div>
+
+        <!-- Mini Map for search -->
+        <div class="section-header">
+          <h2>Location</h2>
+        </div>
+        <div id="search-map" class="mini-map"></div>
+      </div>
+
+      <!-- Loading state -->
+      <div id="search-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>Fetching property data...</p>
+      </div>
+
+      <!-- Empty / Error states -->
+      <div id="search-empty" class="empty-state hidden">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        <p id="search-empty-text">No property found at that address. Try a different search.</p>
+      </div>
+    </section>
+
+    <!-- TAB: SCANNER -->
+    <section class="tab-panel" id="tab-scanner">
+      <div class="scanner-header">
+        <h1>Property Scanner</h1>
+        <p>Set your criteria and find the best available properties</p>
+      </div>
+      <div class="scanner-layout">
+        <aside class="scanner-filters">
+          <h3>Search Criteria</h3>
+          <div class="filter-group">
+            <label>Location</label>
+            <input type="text" id="scan-city" placeholder="City" />
+            <div class="filter-row">
+              <input type="text" id="scan-state" placeholder="State (e.g. CA)" maxlength="2" />
+              <input type="text" id="scan-zip" placeholder="Zip Code" maxlength="5" />
+            </div>
+          </div>
+          <div class="filter-group">
+            <label>Listing Type</label>
+            <select id="scan-type">
+              <option value="sale">For Sale</option>
+              <option value="rental">For Rent</option>
+            </select>
+          </div>
+          <div class="filter-group">
+            <label>Price Range</label>
+            <div class="filter-row">
+              <input type="number" id="scan-price-min" placeholder="Min" />
+              <input type="number" id="scan-price-max" placeholder="Max" />
+            </div>
+          </div>
+          <div class="filter-group">
+            <label>Bedrooms</label>
+            <div class="btn-group" id="scan-beds-group">
+              <button class="btn-toggle" data-val="">Any</button>
+              <button class="btn-toggle" data-val="1">1+</button>
+              <button class="btn-toggle" data-val="2">2+</button>
+              <button class="btn-toggle" data-val="3">3+</button>
+              <button class="btn-toggle" data-val="4">4+</button>
+            </div>
+          </div>
+          <div class="filter-group">
+            <label>Bathrooms</label>
+            <div class="btn-group" id="scan-baths-group">
+              <button class="btn-toggle" data-val="">Any</button>
+              <button class="btn-toggle" data-val="1">1+</button>
+              <button class="btn-toggle" data-val="2">2+</button>
+              <button class="btn-toggle" data-val="3">3+</button>
+            </div>
+          </div>
+          <div class="filter-group">
+            <label>Property Type</label>
+            <select id="scan-prop-type">
+              <option value="">Any</option>
+              <option value="Single Family">Single Family</option>
+              <option value="Condo">Condo</option>
+              <option value="Townhouse">Townhouse</option>
+              <option value="Multi-Family">Multi-Family</option>
+            </select>
+          </div>
+          <button id="scan-btn" class="btn btn-primary btn-full">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/><path d="M8 12h8M12 8v8"/></svg>
+            Scan Properties
+          </button>
+        </aside>
+        <div class="scanner-results">
+          <div id="scan-summary" class="scan-summary hidden">
+            <div class="summary-stat">
+              <span class="summary-number" id="scan-count">0</span>
+              <span class="summary-label">Properties Found</span>
+            </div>
+            <div class="summary-stat">
+              <span class="summary-number" id="scan-avg-price">--</span>
+              <span class="summary-label">Avg Price</span>
+            </div>
+            <div class="summary-stat">
+              <span class="summary-number" id="scan-avg-ppsf">--</span>
+              <span class="summary-label">Avg $/Sq Ft</span>
+            </div>
+            <div class="summary-stat">
+              <span class="summary-number" id="scan-best-deal">--</span>
+              <span class="summary-label">Best Deal Score</span>
+            </div>
+          </div>
+          <div id="scan-list" class="scan-list"></div>
+          <div id="scan-loading" class="loading-state hidden">
+            <div class="spinner"></div>
+            <p>Scanning listings...</p>
+          </div>
+          <div id="scan-empty" class="empty-state">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/></svg>
+            <p>Set your filters and click "Scan Properties" to find listings.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: MAP -->
+    <section class="tab-panel" id="tab-map">
+      <div class="map-toolbar">
+        <div class="map-search-bar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="map-search-input" placeholder="Enter address to center map..." />
+          <button id="map-search-btn" class="btn btn-primary">Go</button>
+        </div>
+        <div class="map-controls">
+          <label class="map-radius-label">
+            Radius:
+            <select id="map-radius">
+              <option value="0.5">0.5 mi</option>
+              <option value="1" selected>1 mi</option>
+              <option value="2">2 mi</option>
+              <option value="5">5 mi</option>
+            </select>
+          </label>
+          <button id="map-find-similar" class="btn btn-secondary" disabled>Find Similar Homes</button>
+        </div>
+      </div>
+      <div id="main-map" class="full-map"></div>
+      <div id="map-sidebar" class="map-sidebar hidden">
+        <div class="sidebar-header">
+          <h3>Nearby Properties</h3>
+          <button id="close-sidebar" class="btn-icon">&times;</button>
+        </div>
+        <div id="sidebar-content" class="sidebar-content"></div>
+      </div>
+    </section>
+
+    <!-- TAB: ANALYTICS -->
+    <section class="tab-panel" id="tab-analytics">
+      <div class="analytics-header">
+        <h1>Market Analytics</h1>
+        <p>Zip code level market statistics and trends</p>
+        <div class="analytics-search">
+          <input type="text" id="analytics-zip" placeholder="Enter Zip Code" maxlength="5" />
+          <button id="analytics-btn" class="btn btn-primary">Analyze</button>
+        </div>
+      </div>
+      <div id="analytics-results" class="hidden">
+        <div class="analytics-grid">
+          <div class="analytics-card" id="analytics-sale">
+            <h3>Sale Market</h3>
+            <div class="analytics-big" id="ana-sale-price">--</div>
+            <span class="analytics-sublabel">Median Sale Price</span>
+            <div class="analytics-row">
+              <div><span class="analytics-label">Avg $/SqFt</span><span id="ana-sale-ppsf">--</span></div>
+              <div><span class="analytics-label">Inventory</span><span id="ana-sale-inventory">--</span></div>
+            </div>
+            <div class="analytics-row">
+              <div><span class="analytics-label">Avg Days on Market</span><span id="ana-sale-dom">--</span></div>
+              <div><span class="analytics-label">Median SqFt</span><span id="ana-sale-sqft">--</span></div>
+            </div>
+          </div>
+          <div class="analytics-card" id="analytics-rent">
+            <h3>Rental Market</h3>
+            <div class="analytics-big" id="ana-rent-price">--</div>
+            <span class="analytics-sublabel">Median Rent</span>
+            <div class="analytics-row">
+              <div><span class="analytics-label">Avg $/SqFt</span><span id="ana-rent-ppsf">--</span></div>
+              <div><span class="analytics-label">Inventory</span><span id="ana-rent-inventory">--</span></div>
+            </div>
+            <div class="analytics-row">
+              <div><span class="analytics-label">Avg Days on Market</span><span id="ana-rent-dom">--</span></div>
+              <div><span class="analytics-label">Gross Yield</span><span id="ana-gross-yield">--</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="section-header">
+          <h2>Price Trends (12 months)</h2>
+        </div>
+        <div class="chart-container">
+          <canvas id="trend-chart" height="300"></canvas>
+        </div>
+      </div>
+      <div id="analytics-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>Analyzing market data...</p>
+      </div>
+      <div id="analytics-empty" class="empty-state">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+        <p>Enter a zip code to see market analytics.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
