@@ -56,10 +56,21 @@ async function checkApiStatus() {
   try {
     const res = await fetch('/api/health');
     const data = await res.json();
-    if (data.apiConfigured) {
-      el.className = 'api-status live';
-      el.querySelector('.status-text').textContent = 'API Connected';
+    if (data.status === 'ok') {
       state.apiLive = true;
+      // Only count real data sources (not geocoding which is always free)
+      const dataSources = ['zillow', 'realtor', 'rentcast'];
+      const activeSources = dataSources.filter(s =>
+        data.sources?.[s] === 'active'
+      );
+      if (activeSources.length > 0) {
+        el.className = 'api-status live';
+        el.querySelector('.status-text').textContent = activeSources.join(' + ');
+      } else {
+        el.className = 'api-status demo';
+        el.querySelector('.status-text').textContent = 'Demo Mode — add API keys';
+        state.demoMode = true;
+      }
     } else {
       el.className = 'api-status demo';
       el.querySelector('.status-text').textContent = 'Demo Mode';
@@ -68,6 +79,7 @@ async function checkApiStatus() {
   } catch {
     el.className = 'api-status error';
     el.querySelector('.status-text').textContent = 'Offline';
+    state.demoMode = true;
   }
 }
 
@@ -116,139 +128,81 @@ function debounce(fn, ms) {
 
 // ---------------------------------------------------------------------------
 // Demo Data (used when API key is not configured)
+// Generates location-aware data based on geocoded coordinates
 // ---------------------------------------------------------------------------
-function getDemoProperty() {
+const STREET_NAMES = [
+  'Oak Lane', 'Maple Dr', 'Elm St', 'Pine Ave', 'Birch Ct',
+  'Cedar Blvd', 'Walnut Way', 'Willow Rd', 'Ash Pl', 'Cherry Ln',
+  'Spruce St', 'Hickory Dr', 'Magnolia Ave', 'Poplar Ct', 'Cypress Way',
+];
+const PROP_TYPES = ['Single Family', 'Single Family', 'Single Family', 'Condo', 'Townhouse'];
+
+function randBetween(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+function jitterCoord(base, spread) {
+  return base + (Math.random() - 0.5) * spread;
+}
+
+function getDemoProperty(address, lat, lon, locationParts) {
+  const city = locationParts?.city || 'Demo City';
+  const st = locationParts?.state || 'XX';
+  const zip = locationParts?.zip || '00000';
   return {
-    addressLine1: '742 Evergreen Terrace',
-    city: 'Springfield',
-    state: 'IL',
-    zipCode: '62704',
+    addressLine1: address || '123 Demo Street',
+    city, state: st, zipCode: zip,
     propertyType: 'Single Family',
-    bedrooms: 4,
-    bathrooms: 2.5,
-    squareFootage: 2100,
-    lotSize: 8500,
-    yearBuilt: 1989,
-    lastSaleDate: '2019-06-15',
-    lastSalePrice: 285000,
-    taxAssessment: 295000,
-    latitude: 39.7817,
-    longitude: -89.6501,
+    bedrooms: 4, bathrooms: 2.5, squareFootage: 2100, lotSize: 8500,
+    yearBuilt: randBetween(1975, 2015),
+    lastSaleDate: '2019-06-15', lastSalePrice: randBetween(250000, 350000),
+    taxAssessment: randBetween(270000, 320000),
+    latitude: lat, longitude: lon,
   };
 }
 
-function getDemoValuation() {
+function getDemoValuation(lat, lon, locationParts) {
+  const city = locationParts?.city || 'Demo City';
+  const st = locationParts?.state || 'XX';
+  const zip = locationParts?.zip || '00000';
+  const basePrice = randBetween(280000, 400000);
   return {
-    price: 342000,
-    priceRangeLow: 318000,
-    priceRangeHigh: 366000,
-    pricePerSquareFoot: 162.86,
-    rentEstimate: 1850,
-    comparables: [
-      {
-        formattedAddress: '128 Oak Lane, Springfield, IL 62704',
-        price: 335000,
-        squareFootage: 2050,
-        bedrooms: 4,
-        bathrooms: 2,
-        distance: 0.3,
-        propertyType: 'Single Family',
-        yearBuilt: 1992,
-        latitude: 39.783,
-        longitude: -89.652,
-      },
-      {
-        formattedAddress: '456 Maple Dr, Springfield, IL 62704',
-        price: 349000,
-        squareFootage: 2200,
-        bedrooms: 4,
-        bathrooms: 2.5,
-        distance: 0.5,
-        propertyType: 'Single Family',
-        yearBuilt: 1985,
-        latitude: 39.785,
-        longitude: -89.648,
-      },
-      {
-        formattedAddress: '789 Elm St, Springfield, IL 62704',
-        price: 328000,
-        squareFootage: 1980,
-        bedrooms: 3,
-        bathrooms: 2,
-        distance: 0.7,
-        propertyType: 'Single Family',
-        yearBuilt: 1990,
-        latitude: 39.779,
-        longitude: -89.654,
-      },
-      {
-        formattedAddress: '321 Pine Ave, Springfield, IL 62704',
-        price: 355000,
-        squareFootage: 2300,
-        bedrooms: 4,
-        bathrooms: 3,
-        distance: 0.9,
-        propertyType: 'Single Family',
-        yearBuilt: 1988,
-        latitude: 39.776,
-        longitude: -89.645,
-      },
-      {
-        formattedAddress: '654 Birch Ct, Springfield, IL 62704',
-        price: 310000,
-        squareFootage: 1850,
-        bedrooms: 3,
-        bathrooms: 2,
-        distance: 1.1,
-        propertyType: 'Single Family',
-        yearBuilt: 1995,
-        latitude: 39.788,
-        longitude: -89.656,
-      },
-    ],
+    price: basePrice,
+    priceRangeLow: Math.round(basePrice * 0.93),
+    priceRangeHigh: Math.round(basePrice * 1.07),
+    pricePerSquareFoot: Math.round(basePrice / 2100),
+    rentEstimate: Math.round(basePrice * 0.005),
+    comparables: Array.from({ length: 5 }, (_, i) => ({
+      formattedAddress: `${randBetween(100, 999)} ${STREET_NAMES[i]}, ${city}, ${st} ${zip}`,
+      price: randBetween(Math.round(basePrice * 0.85), Math.round(basePrice * 1.15)),
+      squareFootage: randBetween(1600, 2600),
+      bedrooms: randBetween(3, 5),
+      bathrooms: [2, 2, 2.5, 3, 3.5][i],
+      distance: +(0.2 + i * 0.25).toFixed(1),
+      propertyType: 'Single Family',
+      yearBuilt: randBetween(1980, 2018),
+      latitude: jitterCoord(lat, 0.012),
+      longitude: jitterCoord(lon, 0.012),
+    })),
   };
 }
 
-function getDemoListings() {
-  const base = [
-    {
-      formattedAddress: '100 Main St, Springfield, IL 62704',
-      price: 275000, squareFootage: 1800, bedrooms: 3, bathrooms: 2,
-      propertyType: 'Single Family', yearBuilt: 1998, daysOnMarket: 12,
-      latitude: 39.782, longitude: -89.651, status: 'Active',
-    },
-    {
-      formattedAddress: '222 River Rd, Springfield, IL 62704',
-      price: 425000, squareFootage: 2800, bedrooms: 5, bathrooms: 3,
-      propertyType: 'Single Family', yearBuilt: 2005, daysOnMarket: 5,
-      latitude: 39.786, longitude: -89.643, status: 'Active',
-    },
-    {
-      formattedAddress: '333 College Ave, Springfield, IL 62704',
-      price: 195000, squareFootage: 1200, bedrooms: 2, bathrooms: 1,
-      propertyType: 'Condo', yearBuilt: 2010, daysOnMarket: 30,
-      latitude: 39.778, longitude: -89.649, status: 'Active',
-    },
-    {
-      formattedAddress: '444 Park Blvd, Springfield, IL 62704',
-      price: 520000, squareFootage: 3200, bedrooms: 5, bathrooms: 4,
-      propertyType: 'Single Family', yearBuilt: 2015, daysOnMarket: 8,
-      latitude: 39.790, longitude: -89.640, status: 'Active',
-    },
-    {
-      formattedAddress: '555 Lake View Dr, Springfield, IL 62704',
-      price: 310000, squareFootage: 2000, bedrooms: 3, bathrooms: 2.5,
-      propertyType: 'Townhouse', yearBuilt: 2001, daysOnMarket: 21,
-      latitude: 39.775, longitude: -89.655, status: 'Active',
-    },
-    {
-      formattedAddress: '666 Sunset Way, Springfield, IL 62704',
-      price: 385000, squareFootage: 2400, bedrooms: 4, bathrooms: 3,
-      propertyType: 'Single Family', yearBuilt: 1995, daysOnMarket: 3,
-      latitude: 39.784, longitude: -89.647, status: 'Active',
-    },
-  ];
-  return base;
+function getDemoListings(lat, lon, locationParts) {
+  const city = locationParts?.city || 'Demo City';
+  const st = locationParts?.state || 'XX';
+  const zip = locationParts?.zip || '00000';
+  return Array.from({ length: 8 }, (_, i) => ({
+    formattedAddress: `${randBetween(100, 999)} ${STREET_NAMES[i % STREET_NAMES.length]}, ${city}, ${st} ${zip}`,
+    price: randBetween(180000, 550000),
+    squareFootage: randBetween(1100, 3400),
+    bedrooms: randBetween(2, 5),
+    bathrooms: [1, 1.5, 2, 2, 2.5, 3, 3, 3.5][i],
+    propertyType: PROP_TYPES[i % PROP_TYPES.length],
+    yearBuilt: randBetween(1985, 2020),
+    daysOnMarket: randBetween(2, 45),
+    latitude: jitterCoord(lat, 0.015),
+    longitude: jitterCoord(lon, 0.015),
+    status: 'Active',
+  }));
 }
 
 function getDemoMarket() {
@@ -267,6 +221,32 @@ function getDemoMarket() {
       medianPrice: 310000 + Math.round(Math.random() * 30000),
       medianRent: 1550 + Math.round(Math.random() * 200),
     })),
+  };
+}
+
+/**
+ * Geocode an address and generate demo data for it.
+ */
+async function fallbackToDemo(address) {
+  let lat = 39.8283, lon = -98.5795, locationParts = {};
+  try {
+    const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+    const geoData = await geoRes.json();
+    if (geoData.length) {
+      lat = parseFloat(geoData[0].lat);
+      lon = parseFloat(geoData[0].lon);
+      const parts = geoData[0].display_name.split(', ');
+      locationParts = {
+        city: parts[1] || parts[0] || 'Demo City',
+        state: parts[2] || 'XX',
+        zip: (parts.find((p) => /^\d{5}/.test(p)) || '00000').slice(0, 5),
+      };
+    }
+  } catch { /* fall back to defaults */ }
+  return {
+    prop: getDemoProperty(address, lat, lon, locationParts),
+    val: getDemoValuation(lat, lon, locationParts),
+    lat, lon, locationParts,
   };
 }
 
@@ -330,58 +310,103 @@ async function performSearch(address) {
   hide('search-empty');
   show('search-loading');
 
-  if (state.demoMode || !state.apiLive) {
-    // Demo mode
-    await new Promise((r) => setTimeout(r, 800));
-    const prop = getDemoProperty();
-    const val = getDemoValuation();
+  // If server is unreachable, fall back to demo data
+  if (state.demoMode && !state.apiLive) {
+    let lat = 39.8283, lon = -98.5795, locationParts = {};
+    try {
+      const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+      const geoData = await geoRes.json();
+      if (geoData.length) {
+        lat = parseFloat(geoData[0].lat);
+        lon = parseFloat(geoData[0].lon);
+        const parts = geoData[0].display_name.split(', ');
+        locationParts = {
+          city: parts[1] || parts[0] || 'Demo City',
+          state: parts[2] || 'XX',
+          zip: (parts.find((p) => /^\d{5}/.test(p)) || '00000').slice(0, 5),
+        };
+      }
+    } catch { /* fall back to defaults */ }
+
+    const prop = getDemoProperty(address, lat, lon, locationParts);
+    const val = getDemoValuation(lat, lon, locationParts);
     renderSearchResults(prop, val);
     hide('search-loading');
     show('search-results');
-    toast('Showing demo data — add your RentCast API key for live results', 'info');
+    toast('Server offline — showing demo data', 'info');
     return;
   }
 
   try {
-    // Fetch property data
-    const propRes = await fetch(`/api/property?address=${encodeURIComponent(address)}`);
-    const propData = await propRes.json();
-    if (propData.error) throw new Error(propData.error);
+    const res = await fetch(`/api/property-lookup?address=${encodeURIComponent(address)}`);
+    const data = await res.json();
 
-    const property = Array.isArray(propData) ? propData[0] : propData;
+    // If API returned an error, fall back to demo data
+    if (data.error) {
+      const demoResult = await fallbackToDemo(address);
+      renderSearchResults(demoResult.prop, demoResult.val);
+      hide('search-loading');
+      show('search-results');
+      toast('No API keys configured — showing demo data. Add keys to .env for real results.', 'info');
+      return;
+    }
+
+    const source = data.source || 'unknown';
+    const property = data.property;
     if (!property) {
       hide('search-loading');
       show('search-empty');
       return;
     }
 
-    // Fetch valuation
+    // Normalize into the shape renderSearchResults expects
+    const prop = {
+      addressLine1: property.address || address,
+      city: property.city,
+      state: property.state,
+      zipCode: property.zipCode,
+      propertyType: property.propertyType,
+      bedrooms: property.bedrooms,
+      bathrooms: property.bathrooms,
+      squareFootage: property.squareFootage,
+      lotSize: property.lotSize,
+      yearBuilt: property.yearBuilt,
+      lastSaleDate: property.lastSaleDate,
+      lastSalePrice: property.lastSalePrice,
+      taxAssessment: property.taxAssessment,
+      latitude: property.latitude,
+      longitude: property.longitude,
+    };
+
+    // Build valuation object from whatever source provided
     let valuation = null;
-    try {
-      const valRes = await fetch(`/api/value?address=${encodeURIComponent(address)}`);
-      const valData = await valRes.json();
-      if (!valData.error) valuation = valData;
-    } catch {
-      /* valuation is optional */
+    if (source === 'zillow') {
+      const estimate = property.zestimate || property.price;
+      if (estimate) {
+        valuation = {
+          price: estimate,
+          priceRangeLow: Math.round(estimate * 0.95),
+          priceRangeHigh: Math.round(estimate * 1.05),
+          rentEstimate: property.rentZestimate || null,
+          comparables: [],
+        };
+      }
+    } else if (data.valuation) {
+      valuation = {
+        price: data.valuation.price,
+        priceRangeLow: data.valuation.priceRangeLow,
+        priceRangeHigh: data.valuation.priceRangeHigh,
+        rentEstimate: data.rentEstimate || null,
+        comparables: data.valuation.comparables || [],
+      };
     }
 
-    // Fetch rent estimate
-    let rent = null;
-    try {
-      const rentRes = await fetch(`/api/rent?address=${encodeURIComponent(address)}`);
-      const rentData = await rentRes.json();
-      if (!rentData.error) rent = rentData;
-    } catch {
-      /* rent is optional */
-    }
-
-    if (valuation && rent) {
-      valuation.rentEstimate = rent.rent;
-    }
-
-    renderSearchResults(property, valuation);
+    renderSearchResults(prop, valuation);
     hide('search-loading');
     show('search-results');
+
+    const cached = data.cached ? ' (cached)' : '';
+    toast(`Data from ${source}${cached}`, 'success');
   } catch (err) {
     hide('search-loading');
     show('search-empty');
@@ -547,31 +572,59 @@ async function performScan() {
   show('scan-loading');
   $('scan-list').innerHTML = '';
 
-  if (state.demoMode || !state.apiLive) {
-    await new Promise((r) => setTimeout(r, 600));
-    const listings = getDemoListings();
+  if (state.demoMode && !state.apiLive) {
+    // Server offline — geocode and show demo data
+    let lat = 39.8283, lon = -98.5795, locationParts = { city: city || 'Demo City', state: stateVal || 'XX', zip: zip || '00000' };
+    try {
+      const q = zip || `${city}, ${stateVal}`;
+      const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const geoData = await geoRes.json();
+      if (geoData.length) {
+        lat = parseFloat(geoData[0].lat);
+        lon = parseFloat(geoData[0].lon);
+        const parts = geoData[0].display_name.split(', ');
+        locationParts.city = locationParts.city || parts[0];
+        locationParts.state = locationParts.state || parts[2] || 'XX';
+      }
+    } catch { /* fall back */ }
+    const listings = getDemoListings(lat, lon, locationParts);
     renderScanResults(listings);
     hide('scan-loading');
-    toast('Showing demo data — add your RentCast API key for live results', 'info');
+    toast('Server offline — showing demo data', 'info');
     return;
   }
 
   try {
-    const endpoint = type === 'rental' ? '/api/listings/rental' : '/api/listings/sale';
+    const location = zip || (city && stateVal ? `${city}, ${stateVal}` : city);
     const params = new URLSearchParams();
+    params.set('location', location);
     if (city) params.set('city', city);
     if (stateVal) params.set('state', stateVal);
     if (zip) params.set('zipCode', zip);
-    if (priceMin) params.set('priceMin', priceMin);
-    if (priceMax) params.set('priceMax', priceMax);
-    if (beds) params.set('bedrooms', beds);
-    if (baths) params.set('bathrooms', baths);
+    if (priceMin) params.set('minPrice', priceMin);
+    if (priceMax) params.set('maxPrice', priceMax);
+    if (beds) params.set('beds', beds);
+    if (baths) params.set('baths', baths);
 
-    const res = await fetch(`${endpoint}?${params}`);
+    const res = await fetch(`/api/listings-lookup?${params}`);
     const data = await res.json();
-    if (data.error) throw new Error(data.error);
+    if (data.error) {
+      // No API keys — fall back to demo data
+      let lat = 39.8283, lon = -98.5795;
+      const locationParts = { city: city || 'Demo City', state: stateVal || 'XX', zip: zip || '00000' };
+      try {
+        const q = zip || `${city}, ${stateVal}`;
+        const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+        const geoData = await geoRes.json();
+        if (geoData.length) { lat = parseFloat(geoData[0].lat); lon = parseFloat(geoData[0].lon); }
+      } catch { /* ignore */ }
+      renderScanResults(getDemoListings(lat, lon, locationParts));
+      hide('scan-loading');
+      toast('No API keys configured — showing demo data', 'info');
+      return;
+    }
 
-    const listings = Array.isArray(data) ? data : [];
+    const listings = Array.isArray(data.listings) ? data.listings : [];
     if (!listings.length) {
       hide('scan-loading');
       $('scan-list').innerHTML =
@@ -579,8 +632,26 @@ async function performScan() {
       return;
     }
 
-    renderScanResults(listings);
+    // Normalize listing fields for renderScanResults
+    const normalized = listings.map(l => ({
+      formattedAddress: l.formattedAddress || l.address || l.addressLine1 || '--',
+      price: l.price || l.unformattedPrice || 0,
+      squareFootage: l.squareFootage || l.area || 0,
+      bedrooms: l.bedrooms || l.beds,
+      bathrooms: l.bathrooms || l.baths,
+      propertyType: l.propertyType,
+      yearBuilt: l.yearBuilt,
+      daysOnMarket: l.daysOnMarket || l.daysOnZillow,
+      latitude: l.latitude,
+      longitude: l.longitude,
+      status: l.status || l.statusText,
+    }));
+
+    renderScanResults(normalized);
     hide('scan-loading');
+
+    const cached = data.cached ? ' (cached)' : '';
+    toast(`${normalized.length} listings from ${data.source}${cached}`, 'success');
   } catch (err) {
     hide('scan-loading');
     toast(err.message, 'error');
@@ -752,39 +823,56 @@ async function findSimilarHomes() {
   $('map-find-similar').textContent = 'Searching...';
 
   let listings;
-  if (state.demoMode || !state.apiLive) {
+
+  // Reverse geocode to get location info
+  let locParts = { city: 'Nearby', state: '', zip: '' };
+  try {
+    const revRes = await fetch(`/api/reverse-geocode?lat=${state.mapCenter.lat}&lon=${state.mapCenter.lon}`);
+    const revData = await revRes.json();
+    locParts.city = revData.address?.city || revData.address?.town || 'Nearby';
+    locParts.state = revData.address?.state || '';
+    locParts.zip = revData.address?.postcode || '';
+  } catch { /* ignore */ }
+
+  if (state.demoMode && !state.apiLive) {
     await new Promise((r) => setTimeout(r, 600));
-    listings = getDemoListings().map((l) => ({
-      ...l,
-      latitude: state.mapCenter.lat + (Math.random() - 0.5) * 0.02,
-      longitude: state.mapCenter.lon + (Math.random() - 0.5) * 0.02,
-    }));
-    toast('Showing demo data — add your RentCast API key for live results', 'info');
+    listings = getDemoListings(state.mapCenter.lat, state.mapCenter.lon, locParts);
+    toast('Server offline — showing demo data', 'info');
   } else {
     try {
-      // Reverse geocode to get zip
-      const revRes = await fetch(
-        `/api/reverse-geocode?lat=${state.mapCenter.lat}&lon=${state.mapCenter.lon}`
-      );
-      const revData = await revRes.json();
-      const zip = revData.address?.postcode;
-
-      if (!zip) {
-        toast('Could not determine zip code for this location', 'error');
+      const location = locParts.zip || `${locParts.city}, ${locParts.state}`;
+      if (!location || location === ', ') {
+        toast('Could not determine location for this area', 'error');
         $('map-find-similar').disabled = false;
         $('map-find-similar').textContent = 'Find Similar Homes';
         return;
       }
 
-      const res = await fetch(`/api/listings/sale?zipCode=${zip}&limit=25`);
+      const res = await fetch(`/api/listings-lookup?location=${encodeURIComponent(location)}&zipCode=${locParts.zip}`);
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      listings = Array.isArray(data) ? data : [];
+      if (data.error) {
+        // No API keys — fall back to demo
+        listings = getDemoListings(state.mapCenter.lat, state.mapCenter.lon, locParts);
+        toast('No API keys configured — showing demo data', 'info');
+      } else {
+        listings = (data.listings || []).map(l => ({
+          formattedAddress: l.formattedAddress || l.address || l.addressLine1 || '--',
+          price: l.price || l.unformattedPrice || 0,
+          squareFootage: l.squareFootage || l.area || 0,
+          bedrooms: l.bedrooms || l.beds,
+          bathrooms: l.bathrooms || l.baths,
+          propertyType: l.propertyType,
+          daysOnMarket: l.daysOnMarket || l.daysOnZillow,
+          latitude: l.latitude,
+          longitude: l.longitude,
+        }));
+        const cached = data.cached ? ' (cached)' : '';
+        toast(`${listings.length} nearby properties from ${data.source}${cached}`, 'success');
+      }
     } catch (err) {
-      toast(err.message, 'error');
-      $('map-find-similar').disabled = false;
-      $('map-find-similar').textContent = 'Find Similar Homes';
-      return;
+      // Network error — fall back to demo
+      listings = getDemoListings(state.mapCenter.lat, state.mapCenter.lon, locParts);
+      toast('Could not reach server — showing demo data', 'info');
     }
   }
 
@@ -883,16 +971,26 @@ async function performAnalytics(zip) {
   show('analytics-loading');
 
   let marketData;
-  if (state.demoMode || !state.apiLive) {
+  if (state.demoMode && !state.apiLive) {
     await new Promise((r) => setTimeout(r, 600));
     marketData = getDemoMarket();
-    toast('Showing demo data — add your RentCast API key for live results', 'info');
+    toast('Server offline — showing demo data', 'info');
   } else {
     try {
-      const res = await fetch(`/api/market?zipCode=${zip}`);
+      const res = await fetch(`/api/rentcast/market?zipCode=${zip}`);
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      marketData = Array.isArray(data) ? data[0] : data;
+      if (data.error) {
+        // RentCast not configured — fall back to demo
+        if (data.demo) {
+          marketData = getDemoMarket();
+          toast('Market analytics requires RentCast API key — showing demo data', 'info');
+        } else {
+          throw new Error(data.error);
+        }
+      } else {
+        marketData = Array.isArray(data) ? data[0] : data;
+        toast('Market data from RentCast', 'success');
+      }
     } catch (err) {
       hide('analytics-loading');
       show('analytics-empty');
