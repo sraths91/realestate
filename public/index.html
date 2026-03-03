@@ -34,10 +34,20 @@
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
           Analytics
         </button>
+        <button class="tab-btn" data-tab="momentum">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Momentum
+        </button>
       </nav>
-      <div class="api-status" id="api-status">
+      <div class="header-actions">
+        <button class="btn-saved-toggle" id="saved-toggle" title="Saved Properties">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+          <span class="saved-count" id="saved-count">0</span>
+        </button>
+        <div class="api-status" id="api-status">
         <span class="status-dot"></span>
         <span class="status-text">Checking...</span>
+      </div>
       </div>
     </div>
   </header>
@@ -354,7 +364,84 @@
         <p>Enter a zip code to see market analytics.</p>
       </div>
     </section>
+
+    <!-- TAB: MOMENTUM -->
+    <section class="tab-panel" id="tab-momentum">
+      <div class="momentum-header">
+        <h1>Neighborhood Momentum</h1>
+        <p>Composite score showing which neighborhoods are trending up or down</p>
+        <div class="momentum-search">
+          <input type="text" id="momentum-zip" placeholder="Enter Zip Code" maxlength="5" />
+          <input type="text" id="momentum-state" placeholder="State (e.g. MN)" maxlength="2" />
+          <button id="momentum-btn" class="btn btn-primary">Analyze</button>
+        </div>
+      </div>
+
+      <div id="momentum-results" class="hidden">
+        <!-- Gauge -->
+        <div class="momentum-gauge-section">
+          <div class="momentum-gauge-wrap">
+            <svg id="momentum-gauge" viewBox="0 0 200 120" class="momentum-gauge-svg">
+              <defs>
+                <linearGradient id="gauge-gradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stop-color="var(--red)" />
+                  <stop offset="50%" stop-color="var(--yellow)" />
+                  <stop offset="100%" stop-color="var(--green)" />
+                </linearGradient>
+              </defs>
+              <!-- Background arc -->
+              <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--border)" stroke-width="12" stroke-linecap="round" />
+              <!-- Score arc (filled dynamically) -->
+              <path id="gauge-fill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gauge-gradient)" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 251.3" />
+              <!-- Score text -->
+              <text id="gauge-score" x="100" y="85" text-anchor="middle" fill="var(--text)" font-size="36" font-weight="800">--</text>
+              <text x="100" y="105" text-anchor="middle" fill="var(--text-muted)" font-size="11">out of 100</text>
+            </svg>
+          </div>
+          <div class="momentum-trend" id="momentum-trend">
+            <span class="trend-arrow" id="trend-arrow"></span>
+            <span class="trend-label" id="trend-label">Calculating...</span>
+          </div>
+        </div>
+
+        <!-- Factor breakdown -->
+        <div class="section-header">
+          <h2>Score Breakdown</h2>
+          <p>How each factor contributes to the overall momentum</p>
+        </div>
+        <div class="factors-grid" id="factors-grid"></div>
+
+        <!-- Raw data -->
+        <div class="momentum-meta" id="momentum-meta"></div>
+      </div>
+
+      <div id="momentum-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>Analyzing neighborhood data...</p>
+      </div>
+      <div id="momentum-empty" class="empty-state">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <p>Enter a zip code to see the neighborhood momentum score. Uses free public data from Census, FBI Crime, and Walk Score APIs.</p>
+      </div>
+    </section>
   </main>
+
+  <!-- Saved Properties Drawer -->
+  <div id="saved-drawer" class="saved-drawer hidden">
+    <div class="drawer-header">
+      <h3>Saved Properties</h3>
+      <div class="drawer-actions">
+        <button id="refresh-saved" class="btn btn-secondary btn-sm" title="Refresh values">Refresh</button>
+        <button id="share-saved" class="btn btn-secondary btn-sm" title="Copy share link">Share</button>
+        <button id="close-drawer" class="btn-icon">&times;</button>
+      </div>
+    </div>
+    <div id="saved-list" class="saved-list"></div>
+    <div id="saved-empty" class="saved-empty-state">
+      <p>No saved properties yet. Click the heart icon on any property to save it.</p>
+    </div>
+  </div>
+  <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
 
   <!-- Toast container -->
   <div id="toast-container" class="toast-container"></div>

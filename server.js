@@ -7,6 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
+const WALKSCORE_KEY = process.env.WALKSCORE_API_KEY;
 const RENTCAST_BASE = 'https://api.rentcast.io/v1';
 
 app.use(cors());
@@ -450,6 +451,11 @@ app.get('/api/listings-lookup', async (req, res) => {
       return res.status(404).json({ error: 'No listings found from any source' });
     }
 
+    // Enrich listings with Deal Pulse metrics
+    if (result.listings) {
+      result.listings = enrichWithDealPulse(result.listings);
+    }
+
     cacheSet(cacheKey, result);
     res.json(result);
   } catch (err) {
@@ -482,6 +488,310 @@ app.get('/api/rentcast/market', requireRentCast, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ===========================================================================
+// MOMENTUM SCORE — Census + Walk Score + FBI Crime → composite 0-100
+// ===========================================================================
+
+/**
+ * Fetch Census ACS data by zip code (ZCTA). Free, no key required.
+ * Returns median income, median home value, population, vacancy rate.
+ */
+async function censusApiFetch(zipCode) {
+  const cacheKey = `census:${zipCode}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  // ACS 5-year estimates: B19013_001E = median income, B25077_001E = median home value,
+  // B01003_001E = population, B25002_003E = vacant units, B25002_001E = total units
+  const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E';
+  const url = `https://api.census.gov/data/2022/acs/acs5?get=${vars}&for=zip%20code%20tabulation%20area:${zipCode}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) throw new Error(`Census API ${r.status}`);
+  const data = await r.json();
+  // Response: [[header], [values, ..., zipCode]]
+  if (!data || data.length < 2) throw new Error('No census data for this zip');
+  const row = data[1];
+  const result = {
+    medianIncome: parseInt(row[0]) || null,
+    medianHomeValue: parseInt(row[1]) || null,
+    population: parseInt(row[2]) || null,
+    vacantUnits: parseInt(row[3]) || null,
+    totalUnits: parseInt(row[4]) || null,
+  };
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+/**
+ * Fetch Walk Score for a lat/lon. Requires WALKSCORE_API_KEY (free tier: 5000/day).
+ */
+async function walkScoreFetch(lat, lon, address) {
+  if (!WALKSCORE_KEY) return null;
+  const cacheKey = `walkscore:${lat.toFixed(4)},${lon.toFixed(4)}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = `https://api.walkscore.com/score?format=json&lat=${lat}&lon=${lon}&transit=1&bike=1&wsapikey=${WALKSCORE_KEY}&address=${encodeURIComponent(address || '')}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) throw new Error(`Walk Score API ${r.status}`);
+  const data = await r.json();
+  const result = {
+    walkscore: data.walkscore ?? null,
+    transit: data.transit?.score ?? null,
+    bike: data.bike?.score ?? null,
+    description: data.description || null,
+  };
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+/**
+ * Fetch FBI crime data by state abbreviation. Free, no key required.
+ * Returns violent + property crime rates per 100k.
+ */
+async function crimeApiFetch(stateAbbr) {
+  if (!stateAbbr) return null;
+  const cacheKey = `crime:${stateAbbr.toLowerCase()}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  // FBI CDE API — state-level crime estimates
+  const url = `https://api.usa.gov/crime/fbi/cde/estimate/state/${stateAbbr.toLowerCase()}?from=2020&to=2022&API_KEY=iiHnOKfno2Mgkt5AynpvPpUQTEyxE77jo1RU8PIv`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) throw new Error(`FBI Crime API ${r.status}`);
+  const data = await r.json();
+
+  // Get the most recent year's data
+  const results = data.results || [];
+  const latest = results[results.length - 1] || {};
+  const pop = latest.population || 1;
+  const result = {
+    violentCrimeRate: latest.violent_crime ? Math.round((latest.violent_crime / pop) * 100000) : null,
+    propertyCrimeRate: latest.property_crime ? Math.round((latest.property_crime / pop) * 100000) : null,
+    year: latest.year || null,
+  };
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+/**
+ * Compute composite momentum score (0-100).
+ * Weights: priceTrend 25%, walkability 15%, safety 20%, income 15%, affordability 25%
+ */
+function computeMomentumScore(census, walkScore, crime) {
+  const factors = [];
+
+  // 1. Affordability (25%) — income-to-price ratio
+  //    National median: ~$75k income, ~$300k home → ratio ~0.25
+  //    Higher ratio = more affordable = better score
+  let affordabilityScore = 50;
+  if (census?.medianIncome && census?.medianHomeValue && census.medianHomeValue > 0) {
+    const ratio = census.medianIncome / census.medianHomeValue;
+    // ratio 0.4+ = excellent (100), 0.25 = average (50), 0.1 = poor (10)
+    affordabilityScore = Math.min(100, Math.max(0, Math.round(ratio * 250)));
+  }
+  factors.push({ name: 'Affordability', score: affordabilityScore, weight: 0.25, detail: census?.medianHomeValue ? `Median home $${(census.medianHomeValue / 1000).toFixed(0)}K vs income $${(census.medianIncome / 1000).toFixed(0)}K` : 'No data available' });
+
+  // 2. Price Trend (25%) — based on vacancy rate as proxy
+  //    Lower vacancy = higher demand = positive trend
+  let priceTrendScore = 50;
+  if (census?.vacantUnits != null && census?.totalUnits > 0) {
+    const vacancyRate = census.vacantUnits / census.totalUnits;
+    // 2% vacancy = hot market (90), 10% = average (50), 20%+ = cold (10)
+    priceTrendScore = Math.min(100, Math.max(0, Math.round(100 - vacancyRate * 500)));
+  }
+  factors.push({ name: 'Price Trend', score: priceTrendScore, weight: 0.25, detail: census?.totalUnits ? `${((census.vacantUnits / census.totalUnits) * 100).toFixed(1)}% vacancy rate` : 'Based on market indicators' });
+
+  // 3. Safety (20%) — inverse of crime rate
+  //    National avg violent crime: ~380 per 100k
+  let safetyScore = 50;
+  if (crime?.violentCrimeRate != null) {
+    // 100/100k = very safe (95), 380/100k = average (50), 800+ = poor (10)
+    safetyScore = Math.min(100, Math.max(0, Math.round(100 - (crime.violentCrimeRate / 8))));
+  }
+  factors.push({ name: 'Safety', score: safetyScore, weight: 0.20, detail: crime?.violentCrimeRate ? `${crime.violentCrimeRate} violent crimes per 100K` : 'State-level estimate' });
+
+  // 4. Walkability (15%)
+  let walkabilityScore = 50;
+  if (walkScore?.walkscore != null) {
+    walkabilityScore = walkScore.walkscore;
+  }
+  factors.push({ name: 'Walkability', score: walkabilityScore, weight: 0.15, detail: walkScore?.description || (WALKSCORE_KEY ? 'Score unavailable' : 'Add WALKSCORE_API_KEY for data') });
+
+  // 5. Income (15%) — median income relative to national ($75k)
+  let incomeScore = 50;
+  if (census?.medianIncome) {
+    // $50k = 33, $75k = 50, $100k = 67, $150k = 100
+    incomeScore = Math.min(100, Math.max(0, Math.round((census.medianIncome / 150000) * 100)));
+  }
+  factors.push({ name: 'Income', score: incomeScore, weight: 0.15, detail: census?.medianIncome ? `$${(census.medianIncome / 1000).toFixed(0)}K median household` : 'No data available' });
+
+  // Weighted average
+  const overall = Math.round(factors.reduce((sum, f) => sum + f.score * f.weight, 0));
+
+  // Trend direction
+  let trend = 'stable';
+  if (overall >= 65) trend = 'up';
+  else if (overall <= 35) trend = 'down';
+
+  return { overallScore: overall, trend, factors };
+}
+
+app.get('/api/momentum', async (req, res) => {
+  try {
+    const { zipCode, lat, lon, state } = req.query;
+    if (!zipCode) return res.status(400).json({ error: 'Missing zipCode parameter' });
+
+    const cacheKey = `momentum:${zipCode}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ ...cached, cached: true });
+
+    let census = null, walkScore = null, crime = null;
+    const errors = [];
+
+    // Fetch all data sources in parallel
+    const [censusResult, walkResult, crimeResult] = await Promise.allSettled([
+      censusApiFetch(zipCode),
+      lat && lon ? walkScoreFetch(parseFloat(lat), parseFloat(lon), '') : Promise.resolve(null),
+      state ? crimeApiFetch(state) : Promise.resolve(null),
+    ]);
+
+    if (censusResult.status === 'fulfilled') census = censusResult.value;
+    else errors.push('Census: ' + censusResult.reason?.message);
+
+    if (walkResult.status === 'fulfilled') walkScore = walkResult.value;
+    else errors.push('Walk Score: ' + walkResult.reason?.message);
+
+    if (crimeResult.status === 'fulfilled') crime = crimeResult.value;
+    else errors.push('Crime: ' + crimeResult.reason?.message);
+
+    // If we got no data at all, return demo
+    if (!census && !walkScore && !crime) {
+      return res.json({
+        demo: true,
+        zipCode,
+        ...getDemoMomentum(),
+      });
+    }
+
+    const result = {
+      zipCode,
+      ...computeMomentumScore(census, walkScore, crime),
+      rawData: { census, walkScore, crime },
+      errors: errors.length ? errors : undefined,
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Demo momentum data for when APIs are unavailable. */
+function getDemoMomentum() {
+  const scores = [
+    { name: 'Affordability', score: 62, weight: 0.25, detail: 'Median home $285K vs income $72K' },
+    { name: 'Price Trend', score: 71, weight: 0.25, detail: '5.8% vacancy rate — moderate demand' },
+    { name: 'Safety', score: 58, weight: 0.20, detail: '335 violent crimes per 100K' },
+    { name: 'Walkability', score: 45, weight: 0.15, detail: 'Car-Dependent' },
+    { name: 'Income', score: 48, weight: 0.15, detail: '$72K median household' },
+  ];
+  const overall = Math.round(scores.reduce((s, f) => s + f.score * f.weight, 0));
+  return { overallScore: overall, trend: 'up', factors: scores };
+}
+
+// ===========================================================================
+// DEAL PULSE — compute deal quality metrics for listings
+// ===========================================================================
+
+/**
+ * Enrich listings with Deal Pulse metrics.
+ * @param {Array} listings - Array of normalized listing objects
+ * @returns {Array} listings with dealPulse, priceDropProbability, offerTiming, marketPosition
+ */
+function enrichWithDealPulse(listings) {
+  if (!listings.length) return listings;
+
+  const withPrice = listings.filter(l => l.price > 0 && l.squareFootage > 0);
+  const medianPpsf = withPrice.length
+    ? withPrice.map(l => l.price / l.squareFootage).sort((a, b) => a - b)[Math.floor(withPrice.length / 2)]
+    : 0;
+  const avgPrice = withPrice.length
+    ? withPrice.reduce((s, l) => s + l.price, 0) / withPrice.length
+    : 0;
+
+  return listings.map(listing => {
+    const ppsf = listing.squareFootage > 0 ? listing.price / listing.squareFootage : 0;
+    const dom = listing.daysOnMarket || 0;
+
+    // Price drop probability (0-100%)
+    let priceDropProb = 15; // baseline
+    if (dom > 60) priceDropProb += 35;
+    else if (dom > 30) priceDropProb += 20;
+    else if (dom > 14) priceDropProb += 8;
+
+    if (medianPpsf > 0 && ppsf > 0) {
+      const priceRatio = ppsf / medianPpsf;
+      if (priceRatio > 1.15) priceDropProb += 20;
+      else if (priceRatio > 1.05) priceDropProb += 10;
+      else if (priceRatio < 0.9) priceDropProb -= 10;
+    }
+    priceDropProb = Math.max(5, Math.min(85, priceDropProb));
+
+    // Market position
+    let marketPosition = 'fair';
+    if (medianPpsf > 0 && ppsf > 0) {
+      const ratio = ppsf / medianPpsf;
+      if (ratio < 0.92) marketPosition = 'underpriced';
+      else if (ratio > 1.08) marketPosition = 'overpriced';
+    }
+
+    // Offer timing
+    let offerTiming = 'watch';
+    if (marketPosition === 'underpriced' && dom < 14) offerTiming = 'now';
+    else if (dom > 30 || priceDropProb > 45) offerTiming = 'wait';
+    else if (marketPosition === 'underpriced') offerTiming = 'now';
+
+    // Deal Pulse rating
+    let dealPulse = 'cold';
+    let dealScore = 50;
+
+    // Enhanced deal score
+    if (medianPpsf > 0 && ppsf > 0) {
+      const ratio = ppsf / medianPpsf;
+      if (ratio < 0.85) dealScore += 25;
+      else if (ratio < 0.95) dealScore += 15;
+      else if (ratio < 1.05) dealScore += 5;
+      else if (ratio > 1.15) dealScore -= 15;
+      else if (ratio > 1.05) dealScore -= 5;
+    }
+    if (dom > 60) dealScore += 15;
+    else if (dom > 30) dealScore += 10;
+    else if (dom > 14) dealScore += 5;
+
+    if (listing.yearBuilt >= 2015) dealScore += 5;
+    else if (listing.yearBuilt >= 2000) dealScore += 3;
+
+    if (priceDropProb > 50) dealScore += 8;
+    else if (priceDropProb > 30) dealScore += 4;
+
+    dealScore = Math.max(0, Math.min(100, dealScore));
+
+    if (dealScore >= 72) dealPulse = 'hot';
+    else if (dealScore >= 55) dealPulse = 'warm';
+
+    return {
+      ...listing,
+      dealPulse,
+      dealScore,
+      priceDropProbability: priceDropProb,
+      offerTiming,
+      marketPosition,
+    };
+  });
+}
 
 // ===========================================================================
 // Geocoding (OpenStreetMap Nominatim — free, no key)
@@ -535,6 +845,9 @@ app.get('/api/health', (req, res) => {
     sources.realtor = 'not configured (needs RAPIDAPI_KEY)';
   }
   sources.rentcast = RENTCAST_KEY ? 'active' : 'not configured';
+  sources.census = 'active (free)';
+  sources.walkscore = WALKSCORE_KEY ? 'active' : 'not configured';
+  sources.crime = 'active (free)';
   sources.geocoding = 'active (free)';
 
   res.json({

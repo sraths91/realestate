@@ -14,6 +14,9 @@ const state = {
   apiLive: false,
   demoMode: false,
   searchCache: new Map(),
+  savedProperties: [],
+  lastSearchProperty: null,
+  lastSearchValuation: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -25,6 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initScanner();
   initMap();
   initAnalytics();
+  initMomentum();
+  initSaved();
   checkApiStatus();
 });
 
@@ -416,6 +421,10 @@ async function performSearch(address) {
 }
 
 function renderSearchResults(property, valuation) {
+  // Store for save functionality
+  state.lastSearchProperty = property;
+  state.lastSearchValuation = valuation;
+
   // Property card
   $('prop-address').textContent =
     property.addressLine1 || property.formattedAddress || '--';
@@ -453,6 +462,17 @@ function renderSearchResults(property, valuation) {
       $('val-yield').textContent = fmtPct(grossYield);
     }
   }
+
+  // Save button — add to property card header
+  const existingSaveBtn = document.querySelector('#property-card .btn-save');
+  if (existingSaveBtn) existingSaveBtn.remove();
+  const saveBtn = document.createElement('button');
+  const addr = property.addressLine1 || property.formattedAddress || '';
+  const isSaved = state.savedProperties.some(s => s.address === addr);
+  saveBtn.className = `btn-save${isSaved ? ' saved' : ''}`;
+  saveBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${isSaved ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>${isSaved ? 'Saved' : 'Save'}`;
+  saveBtn.addEventListener('click', () => toggleSaveProperty(property, valuation));
+  $('property-card').querySelector('.card-header').appendChild(saveBtn);
 
   // Comparables
   const compsGrid = $('comps-grid');
@@ -669,33 +689,52 @@ function renderScanResults(listings) {
     ? withSqft.reduce((s, l) => s + l.price / l.squareFootage, 0) / withSqft.length
     : 0;
 
-  // Deal scoring algorithm
+  // If server didn't add Deal Pulse (demo data), compute locally
   const scored = listings.map((listing) => {
-    let score = 50; // base
+    if (listing.dealPulse) return listing; // already enriched by server
 
-    // Price per sqft compared to average (lower is better deal)
+    let score = 50;
     if (listing.squareFootage > 0 && avgPpsf > 0) {
       const ppsf = listing.price / listing.squareFootage;
       const ratio = ppsf / avgPpsf;
-      if (ratio < 0.85) score += 30;
-      else if (ratio < 0.95) score += 20;
-      else if (ratio < 1.05) score += 10;
-      else if (ratio > 1.15) score -= 10;
+      if (ratio < 0.85) score += 25;
+      else if (ratio < 0.95) score += 15;
+      else if (ratio < 1.05) score += 5;
+      else if (ratio > 1.15) score -= 15;
     }
-
-    // Days on market bonus (longer = potential negotiation)
-    if (listing.daysOnMarket > 30) score += 10;
-    else if (listing.daysOnMarket > 60) score += 15;
-
-    // Newer construction bonus
+    if (listing.daysOnMarket > 60) score += 15;
+    else if (listing.daysOnMarket > 30) score += 10;
+    else if (listing.daysOnMarket > 14) score += 5;
     if (listing.yearBuilt >= 2015) score += 5;
     else if (listing.yearBuilt >= 2000) score += 3;
+    score = Math.max(0, Math.min(100, score));
 
-    return { ...listing, dealScore: Math.max(0, Math.min(100, score)) };
+    let dealPulse = 'cold';
+    if (score >= 72) dealPulse = 'hot';
+    else if (score >= 55) dealPulse = 'warm';
+
+    const dom = listing.daysOnMarket || 0;
+    let priceDropProbability = 15;
+    if (dom > 60) priceDropProbability += 35;
+    else if (dom > 30) priceDropProbability += 20;
+    priceDropProbability = Math.min(85, priceDropProbability);
+
+    let offerTiming = 'watch';
+    if (score >= 65 && dom < 14) offerTiming = 'now';
+    else if (dom > 30) offerTiming = 'wait';
+
+    let marketPosition = 'fair';
+    if (listing.squareFootage > 0 && avgPpsf > 0) {
+      const ratio = (listing.price / listing.squareFootage) / avgPpsf;
+      if (ratio < 0.92) marketPosition = 'underpriced';
+      else if (ratio > 1.08) marketPosition = 'overpriced';
+    }
+
+    return { ...listing, dealScore: score, dealPulse, priceDropProbability, offerTiming, marketPosition };
   });
 
   // Sort by deal score descending
-  scored.sort((a, b) => b.dealScore - a.dealScore);
+  scored.sort((a, b) => (b.dealScore || 0) - (a.dealScore || 0));
   const bestScore = scored[0]?.dealScore || 0;
 
   // Summary
@@ -711,17 +750,20 @@ function renderScanResults(listings) {
   scored.forEach((listing, i) => {
     const ppsf =
       listing.squareFootage > 0 ? '$' + (listing.price / listing.squareFootage).toFixed(0) + '/sqft' : '';
-    const isBest = i === 0 && listing.dealScore >= 70;
+    const isBest = i === 0 && (listing.dealScore || 0) >= 70;
+    const score = listing.dealScore || 0;
 
-    let dealClass = 'deal-fair';
-    let dealLabel = 'Fair';
-    if (listing.dealScore >= 75) {
-      dealClass = 'deal-excellent';
-      dealLabel = 'Excellent';
-    } else if (listing.dealScore >= 60) {
-      dealClass = 'deal-good';
-      dealLabel = 'Good';
-    }
+    // Deal Pulse badge
+    const pulseClass = `deal-pulse-${listing.dealPulse || 'cold'}`;
+    const pulseLabel = (listing.dealPulse || 'cold').charAt(0).toUpperCase() + (listing.dealPulse || 'cold').slice(1);
+
+    // Offer timing tag
+    const timingMap = { now: ['Offer Now', 'deal-tag-now'], wait: ['Wait for Drop', 'deal-tag-wait'], watch: ['Watch', 'deal-tag-watch'] };
+    const [timingLabel, timingClass] = timingMap[listing.offerTiming] || timingMap.watch;
+
+    // Market position tag
+    const posMap = { underpriced: ['Underpriced', 'deal-tag-under'], overpriced: ['Overpriced', 'deal-tag-over'], fair: ['Fair Value', 'deal-tag-fair'] };
+    const [posLabel, posClass] = posMap[listing.marketPosition] || posMap.fair;
 
     const card = document.createElement('div');
     card.className = `scan-card${isBest ? ' best-deal' : ''}`;
@@ -735,11 +777,17 @@ function renderScanResults(listings) {
           <span>${listing.propertyType || '--'}</span>
           ${listing.daysOnMarket != null ? `<span>${listing.daysOnMarket} days</span>` : ''}
         </div>
+        <div class="scan-deal-extras">
+          <span class="deal-tag ${timingClass}">${timingLabel}</span>
+          <span class="deal-tag ${posClass}">${posLabel}</span>
+          ${listing.priceDropProbability > 25 ? `<span class="price-drop-prob">Price drop: <span class="prob-value">${listing.priceDropProbability}%</span></span>` : ''}
+        </div>
       </div>
       <div class="scan-pricing">
         <div class="scan-price">${fmtCurrency(listing.price)}</div>
         <div class="scan-ppsf">${ppsf}</div>
-        <div class="deal-score ${dealClass}">${dealLabel} (${listing.dealScore})</div>
+        <span class="deal-pulse-badge ${pulseClass}">${pulseLabel}</span>
+        <div class="deal-score" style="font-size:0.75rem;color:var(--text-dim);margin-top:2px;">Score: ${score}/100</div>
       </div>
     `;
     list.appendChild(card);
@@ -1175,4 +1223,389 @@ function renderTrendChart(history) {
       ctx.fill();
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// MOMENTUM TAB
+// ---------------------------------------------------------------------------
+function initMomentum() {
+  $('momentum-btn').addEventListener('click', () => {
+    const zip = $('momentum-zip').value.trim();
+    const st = $('momentum-state').value.trim();
+    performMomentum(zip, st);
+  });
+  $('momentum-zip').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const zip = $('momentum-zip').value.trim();
+      const st = $('momentum-state').value.trim();
+      performMomentum(zip, st);
+    }
+  });
+}
+
+async function performMomentum(zipCode, stateAbbr) {
+  if (!zipCode || zipCode.length < 5) {
+    toast('Enter a valid 5-digit zip code', 'error');
+    return;
+  }
+
+  hide('momentum-results');
+  hide('momentum-empty');
+  show('momentum-loading');
+
+  // Geocode zip to get lat/lon for Walk Score
+  let lat = null, lon = null;
+  try {
+    const geoRes = await fetch(`/api/geocode?q=${encodeURIComponent(zipCode)}`);
+    const geoData = await geoRes.json();
+    if (geoData.length) {
+      lat = parseFloat(geoData[0].lat);
+      lon = parseFloat(geoData[0].lon);
+      // Auto-detect state if not provided
+      if (!stateAbbr) {
+        const parts = geoData[0].display_name.split(', ');
+        stateAbbr = parts[parts.length - 3] || '';
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    const params = new URLSearchParams({ zipCode });
+    if (lat) params.set('lat', lat);
+    if (lon) params.set('lon', lon);
+    if (stateAbbr) params.set('state', stateAbbr);
+
+    const res = await fetch(`/api/momentum?${params}`);
+    const data = await res.json();
+
+    if (data.error) {
+      hide('momentum-loading');
+      show('momentum-empty');
+      toast(data.error, 'error');
+      return;
+    }
+
+    renderMomentumScore(data);
+    hide('momentum-loading');
+    show('momentum-results');
+
+    const demoNote = data.demo ? ' (demo data)' : '';
+    toast(`Momentum score for ${zipCode}${demoNote}`, 'success');
+  } catch (err) {
+    hide('momentum-loading');
+    show('momentum-empty');
+    toast(err.message, 'error');
+  }
+}
+
+function renderMomentumScore(data) {
+  const score = data.overallScore || 0;
+  const trend = data.trend || 'stable';
+
+  // Animate gauge
+  const maxDash = 251.3; // arc circumference
+  const dashLen = (score / 100) * maxDash;
+  const gaugeFill = $('gauge-fill');
+  gaugeFill.style.transition = 'none';
+  gaugeFill.setAttribute('stroke-dasharray', `0 ${maxDash}`);
+  requestAnimationFrame(() => {
+    gaugeFill.style.transition = 'stroke-dasharray 1s ease-out';
+    gaugeFill.setAttribute('stroke-dasharray', `${dashLen} ${maxDash}`);
+  });
+
+  $('gauge-score').textContent = score;
+
+  // Color the score based on value
+  let scoreColor = 'var(--yellow)';
+  if (score >= 65) scoreColor = 'var(--green)';
+  else if (score <= 35) scoreColor = 'var(--red)';
+  $('gauge-score').setAttribute('fill', scoreColor);
+
+  // Trend
+  const trendArrow = $('trend-arrow');
+  const trendLabel = $('trend-label');
+  if (trend === 'up') {
+    trendArrow.textContent = '\u2191';
+    trendArrow.className = 'trend-arrow up';
+    trendLabel.textContent = 'Trending Up';
+  } else if (trend === 'down') {
+    trendArrow.textContent = '\u2193';
+    trendArrow.className = 'trend-arrow down';
+    trendLabel.textContent = 'Trending Down';
+  } else {
+    trendArrow.textContent = '\u2192';
+    trendArrow.className = 'trend-arrow stable';
+    trendLabel.textContent = 'Stable';
+  }
+
+  // Factor cards
+  const grid = $('factors-grid');
+  grid.innerHTML = '';
+  (data.factors || []).forEach(factor => {
+    const scoreClass = factor.score >= 65 ? 'high' : factor.score >= 40 ? 'mid' : 'low';
+    let barColor = 'var(--yellow)';
+    if (factor.score >= 65) barColor = 'var(--green)';
+    else if (factor.score < 40) barColor = 'var(--red)';
+
+    const card = document.createElement('div');
+    card.className = 'factor-card';
+    card.innerHTML = `
+      <div class="factor-header">
+        <span class="factor-name">${factor.name}</span>
+        <span class="factor-score ${scoreClass}">${factor.score}</span>
+      </div>
+      <div class="factor-bar">
+        <div class="factor-bar-fill" style="width: ${factor.score}%; background: ${barColor};"></div>
+      </div>
+      <div class="factor-detail">${factor.detail || ''}</div>
+      <div class="factor-weight">Weight: ${Math.round(factor.weight * 100)}%</div>
+    `;
+    grid.appendChild(card);
+  });
+
+  // Meta info
+  const meta = $('momentum-meta');
+  const sources = [];
+  if (data.rawData?.census) sources.push('Census ACS');
+  if (data.rawData?.walkScore) sources.push('Walk Score');
+  if (data.rawData?.crime) sources.push('FBI Crime Data');
+  if (data.demo) sources.push('Demo Data');
+  meta.innerHTML = `
+    <strong>Data sources:</strong> ${sources.join(', ') || 'None'}<br>
+    ${data.errors?.length ? `<strong>Warnings:</strong> ${data.errors.join('; ')}` : ''}
+    <br><em>Scores are relative — compare zip codes against each other for best results.</em>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// SAVED PROPERTIES (Client Command Center)
+// ---------------------------------------------------------------------------
+const SAVED_KEY = 'propscout_saved';
+
+function initSaved() {
+  // Load from localStorage
+  try {
+    state.savedProperties = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
+  } catch { state.savedProperties = []; }
+  updateSavedCount();
+
+  // Drawer toggle
+  $('saved-toggle').addEventListener('click', () => {
+    const drawer = $('saved-drawer');
+    const backdrop = $('drawer-backdrop');
+    if (drawer.classList.contains('hidden')) {
+      drawer.classList.remove('hidden');
+      backdrop.classList.remove('hidden');
+      renderSavedDrawer();
+    } else {
+      drawer.classList.add('hidden');
+      backdrop.classList.add('hidden');
+    }
+  });
+
+  $('close-drawer').addEventListener('click', () => {
+    $('saved-drawer').classList.add('hidden');
+    $('drawer-backdrop').classList.add('hidden');
+  });
+  $('drawer-backdrop').addEventListener('click', () => {
+    $('saved-drawer').classList.add('hidden');
+    $('drawer-backdrop').classList.add('hidden');
+  });
+
+  $('refresh-saved').addEventListener('click', refreshSavedValues);
+  $('share-saved').addEventListener('click', generateShareLink);
+
+  // Check for shared properties in URL
+  loadSharedProperties();
+}
+
+function updateSavedCount() {
+  const countEl = $('saved-count');
+  const count = state.savedProperties.length;
+  countEl.textContent = count;
+  countEl.className = count > 0 ? 'saved-count' : 'saved-count empty';
+}
+
+function saveToDisk() {
+  localStorage.setItem(SAVED_KEY, JSON.stringify(state.savedProperties));
+  updateSavedCount();
+}
+
+function toggleSaveProperty(property, valuation) {
+  const address = property.addressLine1 || property.formattedAddress || '';
+  if (!address) return;
+
+  const idx = state.savedProperties.findIndex(s => s.address === address);
+  if (idx >= 0) {
+    // Unsave
+    state.savedProperties.splice(idx, 1);
+    toast('Property removed from saved', 'info');
+  } else {
+    // Save
+    const price = valuation?.price || property.lastSalePrice || property.price || null;
+    state.savedProperties.push({
+      address,
+      savedAt: new Date().toISOString(),
+      savedPrice: price,
+      currentPrice: price,
+      property: {
+        city: property.city,
+        state: property.state,
+        zipCode: property.zipCode,
+        bedrooms: property.bedrooms,
+        bathrooms: property.bathrooms,
+        squareFootage: property.squareFootage,
+        propertyType: property.propertyType,
+      },
+    });
+    toast('Property saved!', 'success');
+  }
+
+  saveToDisk();
+
+  // Re-render search results to update save button
+  if (state.lastSearchProperty) {
+    renderSearchResults(state.lastSearchProperty, state.lastSearchValuation);
+  }
+}
+
+function renderSavedDrawer() {
+  const list = $('saved-list');
+  const empty = $('saved-empty');
+
+  if (!state.savedProperties.length) {
+    list.innerHTML = '';
+    show(empty);
+    return;
+  }
+  hide(empty);
+
+  list.innerHTML = '';
+  state.savedProperties.forEach((saved, i) => {
+    const el = document.createElement('div');
+    el.className = 'saved-property';
+
+    const changeAmt = saved.currentPrice && saved.savedPrice
+      ? saved.currentPrice - saved.savedPrice : 0;
+    let changeClass = 'same', changeText = 'No change';
+    if (changeAmt > 0) {
+      changeClass = 'up';
+      changeText = '+' + fmtCurrency(changeAmt);
+    } else if (changeAmt < 0) {
+      changeClass = 'down';
+      changeText = '-' + fmtCurrency(Math.abs(changeAmt));
+    }
+
+    const prop = saved.property || {};
+    const details = [
+      prop.bedrooms ? prop.bedrooms + ' bd' : null,
+      prop.bathrooms ? prop.bathrooms + ' ba' : null,
+      prop.squareFootage ? fmt(prop.squareFootage) + ' sqft' : null,
+    ].filter(Boolean).join(' | ');
+
+    el.innerHTML = `
+      <button class="sp-remove" data-idx="${i}" title="Remove">&times;</button>
+      <div class="sp-address">${saved.address}</div>
+      <div class="sp-saved-date">Saved ${new Date(saved.savedAt).toLocaleDateString()}</div>
+      ${details ? `<div style="font-size:0.8rem;color:var(--text-muted);margin-top:4px;">${details}</div>` : ''}
+      <div class="sp-prices">
+        <span class="sp-saved-price">Saved at: ${fmtCurrency(saved.savedPrice)}</span>
+        <span class="sp-current-price">${fmtCurrency(saved.currentPrice)}</span>
+        <span class="sp-change ${changeClass}">${changeText}</span>
+      </div>
+    `;
+    list.appendChild(el);
+  });
+
+  // Remove buttons
+  list.querySelectorAll('.sp-remove').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      state.savedProperties.splice(idx, 1);
+      saveToDisk();
+      renderSavedDrawer();
+      toast('Property removed', 'info');
+    });
+  });
+}
+
+async function refreshSavedValues() {
+  if (!state.savedProperties.length) return;
+  toast('Refreshing saved property values...', 'info');
+
+  let updated = 0;
+  for (const saved of state.savedProperties) {
+    try {
+      const res = await fetch(`/api/property-lookup?address=${encodeURIComponent(saved.address)}`);
+      const data = await res.json();
+      if (!data.error && data.property) {
+        const newPrice = data.property.zestimate || data.property.price || data.valuation?.price;
+        if (newPrice) {
+          saved.currentPrice = newPrice;
+          updated++;
+        }
+      }
+    } catch { /* skip */ }
+  }
+
+  saveToDisk();
+  renderSavedDrawer();
+  toast(`Updated ${updated}/${state.savedProperties.length} property values`, 'success');
+}
+
+function generateShareLink() {
+  if (!state.savedProperties.length) {
+    toast('No saved properties to share', 'error');
+    return;
+  }
+
+  // Encode a minimal version of saved properties
+  const minimal = state.savedProperties.map(s => ({
+    a: s.address,
+    p: s.currentPrice,
+    b: s.property?.bedrooms,
+    ba: s.property?.bathrooms,
+    sf: s.property?.squareFootage,
+  }));
+
+  const encoded = btoa(JSON.stringify(minimal));
+  const url = `${window.location.origin}${window.location.pathname}?shared=${encoded}`;
+
+  navigator.clipboard.writeText(url).then(() => {
+    toast('Share link copied to clipboard!', 'success');
+  }).catch(() => {
+    // Fallback: show in prompt
+    prompt('Copy this share link:', url);
+  });
+}
+
+function loadSharedProperties() {
+  const params = new URLSearchParams(window.location.search);
+  const shared = params.get('shared');
+  if (!shared) return;
+
+  try {
+    const data = JSON.parse(atob(shared));
+    if (!Array.isArray(data) || !data.length) return;
+
+    // Show shared properties in a toast and populate scanner or display
+    toast(`Viewing ${data.length} shared properties`, 'info');
+
+    // If user has no saved props, offer to import
+    if (!state.savedProperties.length) {
+      data.forEach(item => {
+        state.savedProperties.push({
+          address: item.a,
+          savedAt: new Date().toISOString(),
+          savedPrice: item.p,
+          currentPrice: item.p,
+          property: { bedrooms: item.b, bathrooms: item.ba, squareFootage: item.sf },
+        });
+      });
+      saveToDisk();
+    }
+
+    // Clean URL
+    window.history.replaceState({}, '', window.location.pathname);
+  } catch { /* invalid share link */ }
 }
