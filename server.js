@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
 
 const app = express();
@@ -76,6 +77,37 @@ db.exec(`
     avg_ppsf REAL,
     total_inventory INTEGER,
     data_json TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS saved_properties (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL UNIQUE,
+    city TEXT,
+    state TEXT,
+    zip TEXT,
+    bedrooms INTEGER,
+    bathrooms REAL,
+    sqft INTEGER,
+    property_type TEXT,
+    year_built INTEGER,
+    saved_price INTEGER,
+    current_price INTEGER,
+    rent_estimate INTEGER,
+    latitude REAL,
+    longitude REAL,
+    img_src TEXT,
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS portfolios (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    property_ids TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
 `);
@@ -184,19 +216,21 @@ async function rentcastFetch(endpoint, params = {}) {
 // ===========================================================================
 // PROPERTY LOOKUP — RapidAPI Zillow → Realtor → RentCast → 404
 // ===========================================================================
-app.get('/api/property-lookup', async (req, res) => {
-  try {
-    const { address } = req.query;
-    if (!address) return res.status(400).json({ error: 'Missing address' });
 
-    const cacheKey = `lookup:${address.toLowerCase().trim()}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) return res.json({ ...cached, cached: true });
+/**
+ * Reusable property lookup — cascades through Zillow → Realtor → RentCast.
+ * @param {string} address
+ * @returns {Object|null} { source, property, valuation?, rentEstimate? }
+ */
+async function lookupProperty(address) {
+  const cacheKey = `lookup:${address.toLowerCase().trim()}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return { ...cached, cached: true };
 
-    let result = null;
+  let result = null;
 
-    // Source 1: RapidAPI Zillow — property search + Zestimate
-    if (!result && RAPIDAPI_KEY) {
+  // Source 1: RapidAPI Zillow
+  if (!result && RAPIDAPI_KEY) {
       try {
         const data = await zillowApiFetch('/propertyExtendedSearch', {
           location: address,
@@ -340,11 +374,18 @@ app.get('/api/property-lookup', async (req, res) => {
       }
     }
 
-    if (!result) {
-      return res.status(404).json({ error: 'Could not find property data from any source' });
-    }
+    if (!result) return null;
 
     cacheSet(cacheKey, result);
+    return result;
+}
+
+app.get('/api/property-lookup', async (req, res) => {
+  try {
+    const { address } = req.query;
+    if (!address) return res.status(400).json({ error: 'Missing address' });
+    const result = await lookupProperty(address);
+    if (!result) return res.status(404).json({ error: 'Could not find property data from any source' });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1904,20 +1945,236 @@ app.get('/api/health', (req, res) => {
   sources.censusTract = 'active (free)';
   sources.zhvi = zhviLoaded ? 'active (Zillow CSV)' : 'loading...';
 
-  let zhviCount = 0;
-  let snapshotCount = 0;
-  let marketCacheCount = 0;
+  let zhviCount = 0, snapshotCount = 0, marketCacheCount = 0, savedCount = 0, portfolioCount = 0;
   try { zhviCount = db.prepare('SELECT COUNT(*) as c FROM zhvi_data').get().c; } catch {}
   try { snapshotCount = db.prepare('SELECT COUNT(*) as c FROM listing_snapshots').get().c; } catch {}
   try { marketCacheCount = db.prepare('SELECT COUNT(*) as c FROM market_context_cache').get().c; } catch {}
+  try { savedCount = db.prepare('SELECT COUNT(*) as c FROM saved_properties').get().c; } catch {}
+  try { portfolioCount = db.prepare('SELECT COUNT(*) as c FROM portfolios').get().c; } catch {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount },
     uptime: process.uptime(),
   });
+});
+
+// ===========================================================================
+// SAVED PROPERTIES — server-side CRUD for persistent property tracking
+// ===========================================================================
+
+app.get('/api/saved', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM saved_properties ORDER BY created_at DESC').all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/saved', (req, res) => {
+  try {
+    const { address, city, state, zip, bedrooms, bathrooms, sqft, propertyType, yearBuilt,
+            savedPrice, currentPrice, rentEstimate, latitude, longitude, imgSrc, notes } = req.body;
+    if (!address) return res.status(400).json({ error: 'Missing address' });
+
+    // Dedup by address
+    const existing = db.prepare('SELECT id FROM saved_properties WHERE address = ?').get(address);
+    if (existing) return res.json({ id: existing.id, exists: true });
+
+    const result = db.prepare(`
+      INSERT INTO saved_properties
+        (address, city, state, zip, bedrooms, bathrooms, sqft, property_type, year_built,
+         saved_price, current_price, rent_estimate, latitude, longitude, img_src, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(address, city, state, zip, bedrooms, bathrooms, sqft, propertyType, yearBuilt,
+           savedPrice, currentPrice || savedPrice, rentEstimate, latitude, longitude, imgSrc, notes);
+
+    res.json({ id: result.lastInsertRowid });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/saved/:id', (req, res) => {
+  try {
+    const { notes, currentPrice } = req.body;
+    const updates = [];
+    const params = [];
+    if (notes !== undefined) { updates.push('notes = ?'); params.push(notes); }
+    if (currentPrice !== undefined) { updates.push('current_price = ?'); params.push(currentPrice); }
+    if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
+    updates.push("updated_at = datetime('now')");
+    params.push(req.params.id);
+    db.prepare(`UPDATE saved_properties SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/saved/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM saved_properties WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/saved/refresh', async (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM saved_properties').all();
+    let updated = 0;
+    for (const row of rows) {
+      try {
+        const result = await lookupProperty(row.address);
+        if (result?.property) {
+          const newPrice = result.property.zestimate || result.property.price || result.valuation?.price;
+          const newRent = result.rentEstimate || null;
+          if (newPrice) {
+            db.prepare("UPDATE saved_properties SET current_price = ?, rent_estimate = COALESCE(?, rent_estimate), updated_at = datetime('now') WHERE id = ?")
+              .run(newPrice, newRent, row.id);
+            updated++;
+          }
+        }
+      } catch { /* skip individual failures */ }
+    }
+    const refreshed = db.prepare('SELECT * FROM saved_properties ORDER BY created_at DESC').all();
+    res.json({ updated, total: rows.length, properties: refreshed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===========================================================================
+// PORTFOLIOS — persistent shareable property collections
+// ===========================================================================
+
+app.post('/api/portfolios', (req, res) => {
+  try {
+    const { name, description, propertyIds } = req.body;
+    if (!name) return res.status(400).json({ error: 'Missing portfolio name' });
+    if (!Array.isArray(propertyIds) || !propertyIds.length) {
+      return res.status(400).json({ error: 'Missing property IDs' });
+    }
+
+    const id = crypto.randomUUID();
+    db.prepare(`INSERT INTO portfolios (id, name, description, property_ids) VALUES (?, ?, ?, ?)`)
+      .run(id, name, description || '', JSON.stringify(propertyIds));
+
+    res.json({ id, url: `/p/${id}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/portfolios/:id', (req, res) => {
+  try {
+    const portfolio = db.prepare('SELECT * FROM portfolios WHERE id = ?').get(req.params.id);
+    if (!portfolio) return res.status(404).json({ error: 'Portfolio not found' });
+
+    let propertyIds = [];
+    try { propertyIds = JSON.parse(portfolio.property_ids); } catch {}
+
+    let properties = [];
+    if (propertyIds.length) {
+      const placeholders = propertyIds.map(() => '?').join(',');
+      properties = db.prepare(`SELECT * FROM saved_properties WHERE id IN (${placeholders})`).all(...propertyIds);
+    }
+
+    res.json({
+      id: portfolio.id,
+      name: portfolio.name,
+      description: portfolio.description,
+      createdAt: portfolio.created_at,
+      properties,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Serve portfolio page for client-facing share links
+app.get('/p/:uuid', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'portfolio.html'));
+});
+
+// ===========================================================================
+// INVESTMENT CALCULATOR — mortgage + ROI analysis
+// ===========================================================================
+
+app.post('/api/investment/calculate', (req, res) => {
+  try {
+    const {
+      price = 0,
+      downPaymentPct = 20,
+      interestRate = 6.5,
+      loanTermYears = 30,
+      monthlyRent = 0,
+      annualExpensesPct = 40,
+    } = req.body;
+
+    const downPayment = price * (downPaymentPct / 100);
+    const loanAmount = price - downPayment;
+    const monthlyRate = interestRate / 100 / 12;
+    const totalPayments = loanTermYears * 12;
+
+    // Monthly mortgage payment
+    let monthlyPayment = 0;
+    if (monthlyRate > 0 && totalPayments > 0) {
+      monthlyPayment = loanAmount * (monthlyRate * Math.pow(1 + monthlyRate, totalPayments))
+        / (Math.pow(1 + monthlyRate, totalPayments) - 1);
+    }
+
+    const annualRent = monthlyRent * 12;
+    const annualExpenses = annualRent * (annualExpensesPct / 100);
+    const noi = annualRent - annualExpenses;
+    const annualDebtService = monthlyPayment * 12;
+    const annualCashFlow = noi - annualDebtService;
+    const monthlyCashFlow = annualCashFlow / 12;
+
+    // First year amortization breakdown
+    let principalFirstYear = 0;
+    let interestFirstYear = 0;
+    let balance = loanAmount;
+    for (let i = 0; i < 12 && balance > 0; i++) {
+      const interestPayment = balance * monthlyRate;
+      const principalPayment = monthlyPayment - interestPayment;
+      interestFirstYear += interestPayment;
+      principalFirstYear += principalPayment;
+      balance -= principalPayment;
+    }
+
+    const totalCashNeeded = downPayment;
+    const capRate = price > 0 ? (noi / price) * 100 : 0;
+    const cashOnCash = totalCashNeeded > 0 ? (annualCashFlow / totalCashNeeded) * 100 : 0;
+    const grossYield = price > 0 ? (annualRent / price) * 100 : 0;
+    const dscr = annualDebtService > 0 ? noi / annualDebtService : 0;
+    const breakEvenOccupancy = annualRent > 0 ? ((annualExpenses + annualDebtService) / annualRent) * 100 : 0;
+    const onePercentRule = price > 0 ? monthlyRent >= price * 0.01 : false;
+
+    res.json({
+      monthlyPayment: Math.round(monthlyPayment),
+      totalCashNeeded: Math.round(totalCashNeeded),
+      monthlyCashFlow: Math.round(monthlyCashFlow),
+      annualCashFlow: Math.round(annualCashFlow),
+      capRate: +capRate.toFixed(2),
+      cashOnCash: +cashOnCash.toFixed(2),
+      grossYield: +grossYield.toFixed(2),
+      dscr: +dscr.toFixed(2),
+      breakEvenOccupancy: +breakEvenOccupancy.toFixed(1),
+      onePercentRule,
+      amortizationFirstYear: {
+        principal: Math.round(principalFirstYear),
+        interest: Math.round(interestFirstYear),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // SPA fallback

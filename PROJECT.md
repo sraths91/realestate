@@ -107,7 +107,28 @@ Every scan saves listings to SQLite (`listing_snapshots` table). Re-scanning the
 RentCast market data (median DOM, price, inventory) cached in SQLite for 7 days. When available, Deal Pulse uses market-relative scoring instead of scan-only heuristics.
 
 ### 7. Client Command Center
-Save properties, track value changes over time, and share curated lists with clients via shareable links.
+Server-side property portfolio management with persistent shareable links and a full investment calculator.
+
+**Saved Properties (API-backed):**
+- Save any property from Search or Scanner — persisted in SQLite, synced instantly
+- One-time migration from localStorage on first load (backward compatible)
+- Add notes per property, track current vs saved price
+- Bulk refresh — re-fetches current prices from Zillow/Realtor/RentCast cascade
+- localStorage kept as offline fallback
+
+**Portfolio Sharing:**
+- Create named portfolios from saved properties
+- Each portfolio gets a permanent UUID link (`/p/{uuid}`)
+- Branded standalone client view — dark theme, property cards with price tracking
+- Print/PDF button for clean black-on-white reports
+- Legacy `?shared=base64` links still supported
+
+**Investment Calculator:**
+- Full mortgage + ROI analysis per saved property
+- Inputs: purchase price, monthly rent, down payment %, interest rate, loan term, expense ratio
+- Outputs: monthly mortgage, cash flow, cap rate, cash-on-cash return, gross yield, DSCR, break-even occupancy, 1% rule pass/fail
+- Real-time client-side calculation + server endpoint for portfolio views
+- Print-friendly report layout
 
 ## Architecture
 
@@ -155,6 +176,15 @@ Save properties, track value changes over time, and share curated lists with cli
 | GET | `/api/heatmap?lat=&lon=&radius=&metric=` | Tract-level heatmap data |
 | GET | `/api/geocode?q=` | Forward geocoding (Nominatim) |
 | GET | `/api/reverse-geocode?lat=&lon=` | Reverse geocoding (Nominatim) |
+| GET | `/api/saved` | List all saved properties |
+| POST | `/api/saved` | Save a property (deduplicates by address) |
+| PUT | `/api/saved/:id` | Update notes or current price |
+| DELETE | `/api/saved/:id` | Remove a saved property |
+| POST | `/api/saved/refresh` | Bulk refresh current prices via property cascade |
+| POST | `/api/portfolios` | Create shareable portfolio (returns UUID link) |
+| GET | `/api/portfolios/:id` | Fetch portfolio with full property details |
+| GET | `/p/:uuid` | Branded client portfolio view (standalone HTML) |
+| POST | `/api/investment/calculate` | Investment calculator (mortgage + ROI analysis) |
 | GET | `/api/health` | Server status + data sources + DB counts |
 | GET | `/api/cache/stats` | Cache entry count |
 
@@ -164,11 +194,12 @@ Save properties, track value changes over time, and share curated lists with cli
 realtor-tool/
 ├── server.js           Express API + cache + multi-source cascade + SQLite
 ├── data/
-│   └── propscout.db    SQLite (4 tables: momentum_snapshots, zhvi_data, listing_snapshots, market_context_cache)
+│   └── propscout.db    SQLite (6 tables: momentum_snapshots, zhvi_data, listing_snapshots, market_context_cache, saved_properties, portfolios)
 ├── public/
-│   ├── index.html      Single-page app shell (6 tabs)
+│   ├── index.html      Single-page app shell (6 tabs) + investment calculator modal
 │   ├── app.js          Frontend logic, state, rendering, demo data
-│   └── style.css       Dark theme, responsive layout
+│   ├── style.css       Dark theme, responsive layout, print styles
+│   └── portfolio.html  Standalone branded client portfolio view
 ├── .env                API keys (gitignored)
 ├── .env.example        Key descriptions + signup URLs
 ├── package.json        Express + cors + dotenv + better-sqlite3
@@ -229,13 +260,15 @@ When a user queries a zip code, the server:
 - [x] Historical zip-level price drop rates from snapshot database
 - [ ] Calibrate thresholds against historical Zillow/Redfin CSV data (future)
 
-### Phase 3: Client Command Center
-- [ ] SQLite backend for saved properties (persistent, synced across devices)
-- [ ] Persistent shareable links (UUID-based, server-side resolution)
-- [ ] Investment calculator (mortgage, cap rate, cash-on-cash, gross yield)
-- [ ] PDF report generation (branded, print-friendly)
-- [ ] User accounts with login
-- [ ] Live price-drop alerts
+### Phase 3: Client Command Center ✓
+- [x] SQLite backend for saved properties (persistent, server-side CRUD)
+- [x] Persistent shareable portfolio links (UUID-based, server-side resolution)
+- [x] Investment calculator (mortgage, cap rate, cash-on-cash, DSCR, gross yield, 1% rule)
+- [x] Branded client portfolio page (`/p/:uuid`) with print/PDF support
+- [x] Bulk price refresh from property lookup cascade
+- [x] One-time localStorage → server migration (backward compatible)
+- [ ] User accounts with login (future)
+- [ ] Live price-drop alerts (future)
 
 ### Phase 4: Polish + Differentiation
 - [ ] Side-by-side neighborhood momentum comparison

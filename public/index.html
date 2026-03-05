@@ -476,6 +476,90 @@
   </div>
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
 
+  <!-- Investment Calculator Modal -->
+  <div id="calc-modal" class="calc-modal hidden">
+    <div class="calc-content">
+      <div class="calc-header">
+        <h3>Investment Calculator</h3>
+        <span id="calc-address" class="calc-address"></span>
+        <button id="calc-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="calc-body">
+        <div class="calc-inputs">
+          <div class="calc-input-group">
+            <label>Purchase Price ($)</label>
+            <input type="number" id="calc-price" value="0">
+          </div>
+          <div class="calc-input-group">
+            <label>Monthly Rent ($)</label>
+            <input type="number" id="calc-rent" value="0">
+          </div>
+          <div class="calc-input-group">
+            <label>Down Payment (%)</label>
+            <input type="number" id="calc-down" value="20" min="0" max="100">
+          </div>
+          <div class="calc-input-group">
+            <label>Interest Rate (%)</label>
+            <input type="number" id="calc-rate" value="6.5" step="0.1">
+          </div>
+          <div class="calc-input-group">
+            <label>Loan Term (years)</label>
+            <input type="number" id="calc-term" value="30">
+          </div>
+          <div class="calc-input-group">
+            <label>Annual Expenses (%)</label>
+            <input type="number" id="calc-expenses" value="40" min="0" max="100">
+          </div>
+        </div>
+        <div class="calc-results">
+          <div class="calc-result-row">
+            <span class="calc-label">Monthly Mortgage</span>
+            <span class="calc-value" id="calc-monthly-payment">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">Down Payment</span>
+            <span class="calc-value" id="calc-down-amount">--</span>
+          </div>
+          <div class="calc-result-row primary">
+            <span class="calc-label">Monthly Cash Flow</span>
+            <span class="calc-value" id="calc-monthly-cashflow">--</span>
+          </div>
+          <div class="calc-result-row primary">
+            <span class="calc-label">Annual Cash Flow</span>
+            <span class="calc-value" id="calc-annual-cashflow">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">Cap Rate</span>
+            <span class="calc-value" id="calc-cap-rate">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">Cash-on-Cash Return</span>
+            <span class="calc-value" id="calc-coc">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">Gross Yield</span>
+            <span class="calc-value" id="calc-gross-yield">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">DSCR</span>
+            <span class="calc-value" id="calc-dscr">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">Break-Even Occupancy</span>
+            <span class="calc-value" id="calc-breakeven">--</span>
+          </div>
+          <div class="calc-result-row">
+            <span class="calc-label">1% Rule</span>
+            <span class="calc-value" id="calc-one-percent">--</span>
+          </div>
+        </div>
+      </div>
+      <div class="calc-actions">
+        <button id="calc-print" class="btn btn-secondary btn-sm">Print Report</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast container -->
   <div id="toast-container" class="toast-container"></div>
 

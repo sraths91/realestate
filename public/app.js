@@ -34,6 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMomentum();
   initHeatmap();
   initSaved();
+  initCalculator();
   checkApiStatus();
 });
 
@@ -1674,11 +1675,72 @@ function renderMomentumScore(data) {
 // ---------------------------------------------------------------------------
 const SAVED_KEY = 'propscout_saved';
 
-function initSaved() {
-  // Load from localStorage
+async function initSaved() {
+  // Load from server API, fall back to localStorage
   try {
-    state.savedProperties = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
-  } catch { state.savedProperties = []; }
+    const res = await fetch('/api/saved');
+    if (res.ok) {
+      const rows = await res.json();
+      state.savedProperties = rows.map(r => ({
+        id: r.id,
+        address: r.address,
+        savedAt: r.created_at,
+        savedPrice: r.saved_price,
+        currentPrice: r.current_price,
+        rentEstimate: r.rent_estimate,
+        notes: r.notes,
+        property: {
+          city: r.city, state: r.state, zipCode: r.zip,
+          bedrooms: r.bedrooms, bathrooms: r.bathrooms,
+          squareFootage: r.sqft, propertyType: r.property_type,
+          yearBuilt: r.year_built, imgSrc: r.img_src,
+        },
+      }));
+
+      // One-time migration: if server is empty but localStorage has data, push to server
+      if (!rows.length) {
+        try {
+          const local = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
+          if (local.length) {
+            for (const s of local) {
+              await fetch('/api/saved', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  address: s.address, city: s.property?.city, state: s.property?.state,
+                  zip: s.property?.zipCode, bedrooms: s.property?.bedrooms,
+                  bathrooms: s.property?.bathrooms, sqft: s.property?.squareFootage,
+                  propertyType: s.property?.propertyType, savedPrice: s.savedPrice,
+                  currentPrice: s.currentPrice,
+                }),
+              });
+            }
+            // Reload from server
+            const res2 = await fetch('/api/saved');
+            if (res2.ok) {
+              const rows2 = await res2.json();
+              state.savedProperties = rows2.map(r => ({
+                id: r.id, address: r.address, savedAt: r.created_at,
+                savedPrice: r.saved_price, currentPrice: r.current_price,
+                rentEstimate: r.rent_estimate, notes: r.notes,
+                property: { city: r.city, state: r.state, zipCode: r.zip,
+                  bedrooms: r.bedrooms, bathrooms: r.bathrooms,
+                  squareFootage: r.sqft, propertyType: r.property_type },
+              }));
+            }
+            toast(`Migrated ${local.length} saved properties to server`, 'success');
+          }
+        } catch { /* migration failed, not critical */ }
+      }
+    } else {
+      throw new Error('API unavailable');
+    }
+  } catch {
+    // Fallback to localStorage
+    try {
+      state.savedProperties = JSON.parse(localStorage.getItem(SAVED_KEY) || '[]');
+    } catch { state.savedProperties = []; }
+  }
   updateSavedCount();
 
   // Drawer toggle
@@ -1707,7 +1769,7 @@ function initSaved() {
   $('refresh-saved').addEventListener('click', refreshSavedValues);
   $('share-saved').addEventListener('click', generateShareLink);
 
-  // Check for shared properties in URL
+  // Check for legacy shared properties in URL
   loadSharedProperties();
 }
 
@@ -1719,43 +1781,67 @@ function updateSavedCount() {
 }
 
 function saveToDisk() {
+  // Keep localStorage as offline backup
   localStorage.setItem(SAVED_KEY, JSON.stringify(state.savedProperties));
   updateSavedCount();
 }
 
-function toggleSaveProperty(property, valuation) {
+async function toggleSaveProperty(property, valuation) {
   const address = property.addressLine1 || property.formattedAddress || '';
   if (!address) return;
 
   const idx = state.savedProperties.findIndex(s => s.address === address);
   if (idx >= 0) {
-    // Unsave
+    // Unsave — delete from server
+    const saved = state.savedProperties[idx];
+    if (saved.id) {
+      try { await fetch(`/api/saved/${saved.id}`, { method: 'DELETE' }); } catch {}
+    }
     state.savedProperties.splice(idx, 1);
     toast('Property removed from saved', 'info');
   } else {
-    // Save
+    // Save — post to server
     const price = valuation?.price || property.lastSalePrice || property.price || null;
+    const rentEstimate = valuation?.rentEstimate || null;
+    const body = {
+      address,
+      city: property.city, state: property.state, zip: property.zipCode,
+      bedrooms: property.bedrooms, bathrooms: property.bathrooms,
+      sqft: property.squareFootage, propertyType: property.propertyType,
+      yearBuilt: property.yearBuilt, savedPrice: price, currentPrice: price,
+      rentEstimate, latitude: property.latitude, longitude: property.longitude,
+      imgSrc: property.imgSrc || null,
+    };
+
+    let serverId = null;
+    try {
+      const res = await fetch('/api/saved', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      serverId = data.id;
+    } catch { /* save locally if server fails */ }
+
     state.savedProperties.push({
+      id: serverId,
       address,
       savedAt: new Date().toISOString(),
       savedPrice: price,
       currentPrice: price,
+      rentEstimate,
       property: {
-        city: property.city,
-        state: property.state,
-        zipCode: property.zipCode,
-        bedrooms: property.bedrooms,
-        bathrooms: property.bathrooms,
-        squareFootage: property.squareFootage,
-        propertyType: property.propertyType,
+        city: property.city, state: property.state, zipCode: property.zipCode,
+        bedrooms: property.bedrooms, bathrooms: property.bathrooms,
+        squareFootage: property.squareFootage, propertyType: property.propertyType,
+        yearBuilt: property.yearBuilt, imgSrc: property.imgSrc,
       },
     });
     toast('Property saved!', 'success');
   }
 
   saveToDisk();
-
-  // Re-render search results to update save button
   if (state.lastSearchProperty) {
     renderSearchResults(state.lastSearchProperty, state.lastSearchValuation);
   }
@@ -1805,18 +1891,34 @@ function renderSavedDrawer() {
         <span class="sp-current-price">${fmtCurrency(saved.currentPrice)}</span>
         <span class="sp-change ${changeClass}">${changeText}</span>
       </div>
+      ${saved.notes ? `<div class="sp-notes">${saved.notes}</div>` : ''}
+      <div class="sp-actions">
+        <button class="sp-calc-btn" data-idx="${i}" title="Investment Calculator">Calculator</button>
+      </div>
     `;
     list.appendChild(el);
   });
 
   // Remove buttons
   list.querySelectorAll('.sp-remove').forEach(btn => {
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('click', async (e) => {
       const idx = parseInt(e.target.dataset.idx);
+      const saved = state.savedProperties[idx];
+      if (saved.id) {
+        try { await fetch(`/api/saved/${saved.id}`, { method: 'DELETE' }); } catch {}
+      }
       state.savedProperties.splice(idx, 1);
       saveToDisk();
       renderSavedDrawer();
       toast('Property removed', 'info');
+    });
+  });
+
+  // Calculator buttons
+  list.querySelectorAll('.sp-calc-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      openCalculator(state.savedProperties[idx]);
     });
   });
 }
@@ -1825,6 +1927,27 @@ async function refreshSavedValues() {
   if (!state.savedProperties.length) return;
   toast('Refreshing saved property values...', 'info');
 
+  try {
+    const res = await fetch('/api/saved/refresh', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      // Reload state from server response
+      state.savedProperties = data.properties.map(r => ({
+        id: r.id, address: r.address, savedAt: r.created_at,
+        savedPrice: r.saved_price, currentPrice: r.current_price,
+        rentEstimate: r.rent_estimate, notes: r.notes,
+        property: { city: r.city, state: r.state, zipCode: r.zip,
+          bedrooms: r.bedrooms, bathrooms: r.bathrooms,
+          squareFootage: r.sqft, propertyType: r.property_type },
+      }));
+      saveToDisk();
+      renderSavedDrawer();
+      toast(`Updated ${data.updated}/${data.total} property values`, 'success');
+      return;
+    }
+  } catch { /* fallback below */ }
+
+  // Fallback: individual lookups
   let updated = 0;
   for (const saved of state.savedProperties) {
     try {
@@ -1832,43 +1955,57 @@ async function refreshSavedValues() {
       const data = await res.json();
       if (!data.error && data.property) {
         const newPrice = data.property.zestimate || data.property.price || data.valuation?.price;
-        if (newPrice) {
-          saved.currentPrice = newPrice;
-          updated++;
-        }
+        if (newPrice) { saved.currentPrice = newPrice; updated++; }
       }
     } catch { /* skip */ }
   }
-
   saveToDisk();
   renderSavedDrawer();
   toast(`Updated ${updated}/${state.savedProperties.length} property values`, 'success');
 }
 
-function generateShareLink() {
+async function generateShareLink() {
   if (!state.savedProperties.length) {
     toast('No saved properties to share', 'error');
     return;
   }
 
-  // Encode a minimal version of saved properties
-  const minimal = state.savedProperties.map(s => ({
-    a: s.address,
-    p: s.currentPrice,
-    b: s.property?.bedrooms,
-    ba: s.property?.bathrooms,
-    sf: s.property?.squareFootage,
-  }));
+  // Create portfolio on server
+  const propertyIds = state.savedProperties.filter(s => s.id).map(s => s.id);
+  if (propertyIds.length) {
+    try {
+      const res = await fetch('/api/portfolios', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Property Portfolio',
+          description: `${propertyIds.length} curated properties`,
+          propertyIds,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const url = `${window.location.origin}${data.url}`;
+        navigator.clipboard.writeText(url).then(() => {
+          toast('Portfolio link copied to clipboard!', 'success');
+        }).catch(() => {
+          prompt('Copy this portfolio link:', url);
+        });
+        return;
+      }
+    } catch { /* fallback to legacy */ }
+  }
 
+  // Legacy fallback: base64-encoded URL
+  const minimal = state.savedProperties.map(s => ({
+    a: s.address, p: s.currentPrice,
+    b: s.property?.bedrooms, ba: s.property?.bathrooms, sf: s.property?.squareFootage,
+  }));
   const encoded = btoa(JSON.stringify(minimal));
   const url = `${window.location.origin}${window.location.pathname}?shared=${encoded}`;
-
   navigator.clipboard.writeText(url).then(() => {
     toast('Share link copied to clipboard!', 'success');
-  }).catch(() => {
-    // Fallback: show in prompt
-    prompt('Copy this share link:', url);
-  });
+  }).catch(() => { prompt('Copy this share link:', url); });
 }
 
 function loadSharedProperties() {
@@ -1879,25 +2016,100 @@ function loadSharedProperties() {
   try {
     const data = JSON.parse(atob(shared));
     if (!Array.isArray(data) || !data.length) return;
-
-    // Show shared properties in a toast and populate scanner or display
     toast(`Viewing ${data.length} shared properties`, 'info');
 
-    // If user has no saved props, offer to import
     if (!state.savedProperties.length) {
       data.forEach(item => {
         state.savedProperties.push({
-          address: item.a,
-          savedAt: new Date().toISOString(),
-          savedPrice: item.p,
-          currentPrice: item.p,
+          address: item.a, savedAt: new Date().toISOString(),
+          savedPrice: item.p, currentPrice: item.p,
           property: { bedrooms: item.b, bathrooms: item.ba, squareFootage: item.sf },
         });
       });
       saveToDisk();
     }
-
-    // Clean URL
     window.history.replaceState({}, '', window.location.pathname);
   } catch { /* invalid share link */ }
+}
+
+// ===========================================================================
+// INVESTMENT CALCULATOR — mortgage + ROI analysis modal
+// ===========================================================================
+
+function openCalculator(saved) {
+  const modal = $('calc-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+
+  // Populate inputs from saved property
+  const price = saved.currentPrice || saved.savedPrice || 0;
+  const rent = saved.rentEstimate || Math.round(price * 0.007); // rough 0.7% rule estimate
+  $('calc-price').value = price;
+  $('calc-rent').value = rent;
+  $('calc-down').value = 20;
+  $('calc-rate').value = 6.5;
+  $('calc-term').value = 30;
+  $('calc-expenses').value = 40;
+  $('calc-address').textContent = saved.address || 'Property';
+
+  calculateInvestment();
+}
+
+function calculateInvestment() {
+  const price = parseFloat($('calc-price').value) || 0;
+  const downPct = parseFloat($('calc-down').value) || 20;
+  const rate = parseFloat($('calc-rate').value) || 6.5;
+  const term = parseInt($('calc-term').value) || 30;
+  const rent = parseFloat($('calc-rent').value) || 0;
+  const expPct = parseFloat($('calc-expenses').value) || 40;
+
+  const downPayment = price * (downPct / 100);
+  const loan = price - downPayment;
+  const mr = rate / 100 / 12;
+  const n = term * 12;
+  let mp = 0;
+  if (mr > 0 && n > 0) mp = loan * (mr * Math.pow(1 + mr, n)) / (Math.pow(1 + mr, n) - 1);
+
+  const annualRent = rent * 12;
+  const expenses = annualRent * (expPct / 100);
+  const noi = annualRent - expenses;
+  const annualDebt = mp * 12;
+  const cashFlow = noi - annualDebt;
+
+  const capRate = price > 0 ? (noi / price) * 100 : 0;
+  const coc = downPayment > 0 ? (cashFlow / downPayment) * 100 : 0;
+  const grossYield = price > 0 ? (annualRent / price) * 100 : 0;
+  const dscr = annualDebt > 0 ? noi / annualDebt : 0;
+  const breakEven = annualRent > 0 ? ((expenses + annualDebt) / annualRent) * 100 : 0;
+  const onePercent = price > 0 && rent >= price * 0.01;
+
+  $('calc-monthly-payment').textContent = fmtCurrency(mp);
+  $('calc-down-amount').textContent = fmtCurrency(downPayment);
+  $('calc-monthly-cashflow').textContent = fmtCurrency(cashFlow / 12);
+  $('calc-monthly-cashflow').className = cashFlow >= 0 ? 'calc-value positive' : 'calc-value negative';
+  $('calc-annual-cashflow').textContent = fmtCurrency(cashFlow);
+  $('calc-annual-cashflow').className = cashFlow >= 0 ? 'calc-value positive' : 'calc-value negative';
+  $('calc-cap-rate').textContent = capRate.toFixed(2) + '%';
+  $('calc-coc').textContent = coc.toFixed(2) + '%';
+  $('calc-coc').className = coc >= 0 ? 'calc-value positive' : 'calc-value negative';
+  $('calc-gross-yield').textContent = grossYield.toFixed(2) + '%';
+  $('calc-dscr').textContent = dscr.toFixed(2);
+  $('calc-dscr').className = dscr >= 1.25 ? 'calc-value positive' : dscr >= 1 ? 'calc-value' : 'calc-value negative';
+  $('calc-breakeven').textContent = breakEven.toFixed(1) + '%';
+  $('calc-one-percent').textContent = onePercent ? 'PASS' : 'FAIL';
+  $('calc-one-percent').className = onePercent ? 'calc-value positive' : 'calc-value negative';
+}
+
+function initCalculator() {
+  const modal = $('calc-modal');
+  if (!modal) return;
+
+  $('calc-close').addEventListener('click', () => modal.classList.add('hidden'));
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+  $('calc-print').addEventListener('click', () => window.print());
+
+  // Recalculate on any input change
+  ['calc-price', 'calc-rent', 'calc-down', 'calc-rate', 'calc-term', 'calc-expenses'].forEach(id => {
+    $(id).addEventListener('input', calculateInvestment);
+  });
 }

@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Property Portfolio — PropScout</title>
+  <style>
+    :root {
+      --bg: #0f0f1a; --bg-card: #1a1a2e; --border: #2a2a40;
+      --text: #e8e8f0; --text-muted: #8888aa; --text-dim: #555570;
+      --accent: #5b8df9; --green: #4ade80; --red: #f87171; --yellow: #fbbf24;
+      --green-bg: rgba(74,222,128,0.12); --red-bg: rgba(248,113,113,0.12);
+      --radius: 12px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    .portfolio-header {
+      text-align: center; padding: 40px 20px 24px;
+      border-bottom: 1px solid var(--border);
+    }
+    .portfolio-header h1 { font-size: 1.8rem; font-weight: 700; margin-bottom: 4px; }
+    .portfolio-header .subtitle { color: var(--text-muted); font-size: 0.95rem; }
+    .portfolio-header .description { color: var(--text-dim); font-size: 0.85rem; margin-top: 8px; max-width: 600px; margin-left: auto; margin-right: auto; }
+    .portfolio-header .date { color: var(--text-dim); font-size: 0.75rem; margin-top: 12px; }
+
+    .portfolio-actions {
+      text-align: center; padding: 16px;
+    }
+    .btn-print {
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 10px 24px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-print:hover { opacity: 0.9; }
+
+    .portfolio-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 20px; padding: 24px; max-width: 1200px; margin: 0 auto;
+    }
+
+    .property-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; transition: border-color 0.2s;
+    }
+    .property-card:hover { border-color: var(--accent); }
+
+    .pc-address { font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; }
+    .pc-location { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px; }
+    .pc-details { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pc-detail {
+      font-size: 0.8rem; color: var(--text-muted); background: rgba(91,141,249,0.08);
+      padding: 4px 10px; border-radius: 8px;
+    }
+
+    .pc-prices { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+    .pc-price { font-size: 1.3rem; font-weight: 700; color: var(--accent); }
+    .pc-saved-price { font-size: 0.8rem; color: var(--text-dim); }
+    .pc-change { font-size: 0.8rem; font-weight: 600; }
+    .pc-change.up { color: var(--red); }
+    .pc-change.down { color: var(--green); }
+    .pc-change.same { color: var(--text-dim); }
+
+    .pc-notes { font-size: 0.85rem; color: var(--text-muted); margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); font-style: italic; }
+    .pc-img { width: 100%; height: 180px; object-fit: cover; border-radius: 8px; margin-bottom: 12px; }
+
+    .portfolio-footer {
+      text-align: center; padding: 32px 20px; color: var(--text-dim); font-size: 0.8rem;
+      border-top: 1px solid var(--border); margin-top: 24px;
+    }
+    .portfolio-footer a { color: var(--accent); text-decoration: none; }
+
+    .loading { text-align: center; padding: 80px 20px; color: var(--text-muted); }
+    .error { text-align: center; padding: 80px 20px; color: var(--red); }
+
+    @media print {
+      body { background: #fff; color: #111; }
+      .portfolio-header { border-bottom: 2px solid #333; }
+      .portfolio-header h1 { color: #111; }
+      .portfolio-header .subtitle, .portfolio-header .description, .portfolio-header .date { color: #555; }
+      .portfolio-actions { display: none; }
+      .property-card { background: #fff; border: 1px solid #ddd; break-inside: avoid; }
+      .pc-address { color: #111; }
+      .pc-price { color: #2563eb; }
+      .pc-detail { background: #f3f4f6; color: #333; }
+      .pc-change.up { color: #dc2626; }
+      .pc-change.down { color: #16a34a; }
+      .portfolio-footer { color: #888; border-top: 1px solid #ddd; }
+      .portfolio-footer a { color: #2563eb; }
+    }
+
+    @media (max-width: 600px) {
+      .portfolio-grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+      .portfolio-header h1 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+  <div id="portfolio-loading" class="loading">Loading portfolio...</div>
+  <div id="portfolio-error" class="error" style="display:none"></div>
+
+  <div id="portfolio-content" style="display:none">
+    <div class="portfolio-header">
+      <h1 id="p-name"></h1>
+      <div class="subtitle" id="p-subtitle"></div>
+      <div class="description" id="p-description"></div>
+      <div class="date" id="p-date"></div>
+    </div>
+
+    <div class="portfolio-actions">
+      <button class="btn-print" onclick="window.print()">Print / Save as PDF</button>
+    </div>
+
+    <div class="portfolio-grid" id="p-grid"></div>
+
+    <div class="portfolio-footer">
+      Powered by <a href="/">PropScout</a> &mdash; Real Estate Analytics
+    </div>
+  </div>
+
+  <script>
+    (async function() {
+      const uuid = window.location.pathname.split('/p/')[1];
+      if (!uuid) return showError('Invalid portfolio link');
+
+      try {
+        const res = await fetch('/api/portfolios/' + uuid);
+        if (!res.ok) return showError('Portfolio not found');
+        const data = await res.json();
+
+        document.getElementById('portfolio-loading').style.display = 'none';
+        document.getElementById('portfolio-content').style.display = 'block';
+
+        document.getElementById('p-name').textContent = data.name;
+        document.getElementById('p-subtitle').textContent = data.properties.length + ' Properties';
+        if (data.description) document.getElementById('p-description').textContent = data.description;
+        document.getElementById('p-date').textContent = 'Created ' + new Date(data.createdAt).toLocaleDateString();
+        document.title = data.name + ' — PropScout';
+
+        const grid = document.getElementById('p-grid');
+        data.properties.forEach(function(p) {
+          const change = (p.current_price && p.saved_price) ? p.current_price - p.saved_price : 0;
+          let changeClass = 'same', changeText = 'No change';
+          if (change > 0) { changeClass = 'up'; changeText = '+$' + Math.abs(change).toLocaleString(); }
+          else if (change < 0) { changeClass = 'down'; changeText = '-$' + Math.abs(change).toLocaleString(); }
+
+          const details = [
+            p.bedrooms ? p.bedrooms + ' bd' : null,
+            p.bathrooms ? p.bathrooms + ' ba' : null,
+            p.sqft ? p.sqft.toLocaleString() + ' sqft' : null,
+            p.property_type || null,
+            p.year_built ? 'Built ' + p.year_built : null,
+          ].filter(Boolean).map(function(d) { return '<span class="pc-detail">' + d + '</span>'; }).join('');
+
+          const card = document.createElement('div');
+          card.className = 'property-card';
+          card.innerHTML =
+            (p.img_src ? '<img class="pc-img" src="' + p.img_src + '" alt="Property">' : '') +
+            '<div class="pc-address">' + (p.address || '--') + '</div>' +
+            '<div class="pc-location">' + [p.city, p.state, p.zip].filter(Boolean).join(', ') + '</div>' +
+            '<div class="pc-details">' + details + '</div>' +
+            '<div class="pc-prices">' +
+              '<span class="pc-price">$' + (p.current_price || p.saved_price || 0).toLocaleString() + '</span>' +
+              (p.saved_price && change !== 0 ? '<span class="pc-saved-price">Saved at $' + p.saved_price.toLocaleString() + '</span>' : '') +
+              (change !== 0 ? '<span class="pc-change ' + changeClass + '">' + changeText + '</span>' : '') +
+            '</div>' +
+            (p.notes ? '<div class="pc-notes">' + p.notes + '</div>' : '');
+          grid.appendChild(card);
+        });
+      } catch (err) {
+        showError('Failed to load portfolio: ' + err.message);
+      }
+
+      function showError(msg) {
+        document.getElementById('portfolio-loading').style.display = 'none';
+        var el = document.getElementById('portfolio-error');
+        el.style.display = 'block';
+        el.textContent = msg;
+      }
+    })();
+  </script>
+</body>
+</html>
