@@ -566,6 +566,58 @@ select { cursor: pointer; appearance: none;
 }
 .price-drop-prob .prob-value { font-weight: 700; color: var(--yellow); }
 
+/* Bidding War Tags */
+.deal-tag-bidding { background: var(--red-bg); color: var(--red); }
+.deal-tag-bidding-possible { background: var(--yellow-bg); color: var(--yellow); }
+
+/* Days to Sell Tag */
+.deal-tag-dts { background: rgba(167, 139, 250, 0.12); color: #a78bfa; }
+
+/* Price History Tag */
+.price-history-tag {
+  font-size: 0.75rem; color: var(--green); font-weight: 600;
+  display: flex; align-items: center; gap: 4px;
+}
+
+/* ===== COMP NARRATIVE ===== */
+.comp-narrative {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 16px 20px;
+  margin-bottom: 20px;
+}
+.comp-narrative.hidden { display: none; }
+.narrative-header {
+  display: flex; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 0.9rem; margin-bottom: 8px;
+  color: var(--accent);
+}
+.narrative-confidence {
+  font-size: 0.7rem; padding: 2px 8px; border-radius: 12px;
+  font-weight: 600; margin-left: auto; text-transform: capitalize;
+}
+.conf-high { background: var(--green-bg); color: var(--green); }
+.conf-medium { background: var(--yellow-bg); color: var(--yellow); }
+.conf-low { background: rgba(91,141,249,0.12); color: var(--accent); }
+.narrative-summary {
+  font-size: 0.95rem; line-height: 1.5; color: var(--text);
+  margin: 0 0 8px 0;
+}
+.narrative-bullets {
+  list-style: none; padding: 0; margin: 0;
+}
+.narrative-bullets li {
+  font-size: 0.8rem; color: var(--text-muted);
+  padding: 3px 0 3px 16px; position: relative;
+}
+.narrative-bullets li::before {
+  content: ''; position: absolute; left: 0; top: 11px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent);
+}
+
 /* ===== SAVED PROPERTIES ===== */
 .btn-saved-toggle {
   position: relative; display: flex; align-items: center; gap: 6px;

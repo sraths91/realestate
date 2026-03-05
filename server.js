@@ -45,7 +45,46 @@ db.exec(`
     yoy_change REAL,
     updated_at TEXT DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS listing_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_key TEXT NOT NULL,
+    address TEXT NOT NULL,
+    city TEXT,
+    state TEXT,
+    zip TEXT,
+    price INTEGER NOT NULL,
+    price_per_sqft REAL,
+    sqft INTEGER,
+    bedrooms INTEGER,
+    bathrooms REAL,
+    property_type TEXT,
+    year_built INTEGER,
+    days_on_market INTEGER,
+    status TEXT,
+    source TEXT,
+    scan_location TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_listing_key ON listing_snapshots(listing_key, created_at);
+  CREATE INDEX IF NOT EXISTS idx_listing_zip ON listing_snapshots(zip, created_at);
+
+  CREATE TABLE IF NOT EXISTS market_context_cache (
+    zip TEXT PRIMARY KEY,
+    median_dom INTEGER,
+    median_price INTEGER,
+    avg_ppsf REAL,
+    total_inventory INTEGER,
+    data_json TEXT,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
 `);
+
+// Cleanup old listing snapshots (keep 180 days)
+try {
+  const deleted = db.prepare("DELETE FROM listing_snapshots WHERE created_at < datetime('now', '-180 days')").run();
+  if (deleted.changes > 0) console.log(`Cleaned up ${deleted.changes} old listing snapshots`);
+} catch { /* ignore on first run */ }
 console.log('SQLite database initialized at', path.join(DATA_DIR, 'propscout.db'));
 
 // ===========================================================================
@@ -485,13 +524,65 @@ app.get('/api/listings-lookup', async (req, res) => {
       return res.status(404).json({ error: 'No listings found from any source' });
     }
 
-    // Enrich listings with Deal Pulse metrics
-    if (result.listings) {
-      result.listings = enrichWithDealPulse(result.listings);
+    // Fetch market context for Deal Pulse enrichment
+    let marketContext = null;
+    const searchZip = zipCode || result.listings[0]?.zipCode;
+    if (searchZip) {
+      marketContext = getMarketContext(searchZip);
+      if (!marketContext && RENTCAST_KEY) {
+        try {
+          const data = await rentcastFetch('/markets', { zipCode: searchZip, historyRange: 12 });
+          if (data?.saleData || data?.rentalData) {
+            const sale = data.saleData || {};
+            db.prepare(`INSERT OR REPLACE INTO market_context_cache
+              (zip, median_dom, median_price, avg_ppsf, total_inventory, data_json)
+              VALUES (?, ?, ?, ?, ?, ?)`).run(
+              searchZip,
+              sale.averageDaysOnMarket || sale.medianDaysOnMarket || null,
+              sale.medianPrice || sale.averagePrice || null,
+              sale.averagePricePerSquareFoot || null,
+              sale.totalInventory || null,
+              JSON.stringify(data)
+            );
+            marketContext = {
+              medianDom: sale.averageDaysOnMarket || sale.medianDaysOnMarket,
+              medianPrice: sale.medianPrice || sale.averagePrice,
+              avgPpsf: sale.averagePricePerSquareFoot,
+              totalInventory: sale.totalInventory,
+            };
+          }
+        } catch (err) {
+          console.log('RentCast market context failed:', err.message);
+        }
+      }
     }
 
-    cacheSet(cacheKey, result);
-    res.json(result);
+    // Save listing snapshots and detect price changes
+    if (result.listings) {
+      result.listings = saveAndEnrichSnapshots(result.listings, loc, result.source);
+    }
+
+    // Enrich listings with Deal Pulse metrics
+    if (result.listings) {
+      result.listings = enrichWithDealPulse(result.listings, marketContext);
+    }
+
+    // Generate comp narrative
+    const compNarrative = generateCompNarrative(result.listings, marketContext);
+
+    const response = {
+      ...result,
+      compNarrative,
+      marketContext: marketContext ? {
+        medianDom: marketContext.medianDom,
+        medianPrice: marketContext.medianPrice,
+        avgPpsf: marketContext.avgPpsf,
+        inventory: marketContext.totalInventory,
+      } : null,
+    };
+
+    cacheSet(cacheKey, response);
+    res.json(response);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1097,84 +1188,298 @@ function getDemoMomentum() {
 }
 
 // ===========================================================================
-// DEAL PULSE — compute deal quality metrics for listings
+// MARKET CONTEXT — fetch and cache RentCast market data in SQLite
+// ===========================================================================
+
+/**
+ * Get cached market context for a zip code (7-day TTL).
+ * @param {string} zip
+ * @returns {Object|null} { medianDom, medianPrice, avgPpsf, totalInventory }
+ */
+function getMarketContext(zip) {
+  try {
+    const row = db.prepare(
+      "SELECT * FROM market_context_cache WHERE zip = ? AND updated_at > datetime('now', '-7 days')"
+    ).get(zip);
+    if (!row) return null;
+    return {
+      medianDom: row.median_dom,
+      medianPrice: row.median_price,
+      avgPpsf: row.avg_ppsf,
+      totalInventory: row.total_inventory,
+    };
+  } catch { return null; }
+}
+
+// ===========================================================================
+// LISTING SNAPSHOTS — track prices over time, detect reductions
+// ===========================================================================
+
+/**
+ * Generate a deterministic key for deduplicating listings across scans.
+ * @param {Object} listing
+ * @returns {string} e.g. "123 main st:55401"
+ */
+function listingKey(listing) {
+  const addr = (listing.address || listing.formattedAddress || '').toLowerCase().trim();
+  const zip = (listing.zipCode || '').trim();
+  return `${addr}:${zip}`;
+}
+
+/**
+ * Save listing snapshots to SQLite and enrich with price history.
+ * @param {Array} listings - Normalized listing objects
+ * @param {string} scanLocation - Search query used
+ * @param {string} source - Data source name
+ * @returns {Array} Listings enriched with priceHistory
+ */
+function saveAndEnrichSnapshots(listings, scanLocation, source) {
+  const insertStmt = db.prepare(`
+    INSERT INTO listing_snapshots
+      (listing_key, address, city, state, zip, price, price_per_sqft, sqft,
+       bedrooms, bathrooms, property_type, year_built, days_on_market, status, source, scan_location)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const historyStmt = db.prepare(`
+    SELECT price, days_on_market, created_at
+    FROM listing_snapshots
+    WHERE listing_key = ?
+    ORDER BY created_at DESC
+    LIMIT 10
+  `);
+
+  const enriched = listings.map(listing => {
+    const key = listingKey(listing);
+    const ppsf = listing.squareFootage > 0 ? listing.price / listing.squareFootage : null;
+
+    // Get prior snapshots BEFORE inserting current
+    const history = historyStmt.all(key);
+
+    const priceHistory = {
+      snapshots: history.map(h => ({ price: h.price, dom: h.days_on_market, date: h.created_at })),
+      priceChanges: [],
+      hasDropped: false,
+      totalDrop: 0,
+      totalDropPercent: 0,
+      daysSinceFirstSeen: 0,
+    };
+
+    if (history.length > 0) {
+      const firstSeen = history[history.length - 1];
+      const firstDate = new Date(firstSeen.created_at);
+      priceHistory.daysSinceFirstSeen = Math.floor((Date.now() - firstDate) / 86400000);
+
+      // Detect price changes between consecutive snapshots
+      let prevPrice = listing.price;
+      for (const snap of history) {
+        if (snap.price !== prevPrice) {
+          priceHistory.priceChanges.push({
+            from: snap.price,
+            to: prevPrice,
+            change: prevPrice - snap.price,
+            changePercent: ((prevPrice - snap.price) / snap.price * 100).toFixed(1),
+            date: snap.created_at,
+          });
+        }
+        prevPrice = snap.price;
+      }
+
+      if (firstSeen.price > listing.price) {
+        priceHistory.hasDropped = true;
+        priceHistory.totalDrop = firstSeen.price - listing.price;
+        priceHistory.totalDropPercent = ((firstSeen.price - listing.price) / firstSeen.price * 100).toFixed(1);
+      }
+    }
+
+    return { ...listing, priceHistory, _key: key, _ppsf: ppsf };
+  });
+
+  // Batch insert all current snapshots
+  const insertMany = db.transaction((items) => {
+    for (const item of items) {
+      try { insertStmt.run(...item); } catch { /* skip duplicates */ }
+    }
+  });
+
+  const rows = enriched.map(l => [
+    l._key, l.address || l.formattedAddress, l.city, l.state, l.zipCode,
+    l.price, l._ppsf, l.squareFootage, l.bedrooms, l.bathrooms,
+    l.propertyType, l.yearBuilt, l.daysOnMarket, l.status, source, scanLocation,
+  ]);
+  try { insertMany(rows); } catch (err) { console.log('Snapshot save failed:', err.message); }
+
+  // Clean internal fields
+  return enriched.map(({ _key, _ppsf, ...rest }) => rest);
+}
+
+/**
+ * Get historical price drop rate for a zip code from stored snapshots.
+ * @param {string} zip
+ * @returns {number|null} Drop rate as percentage, or null if insufficient data
+ */
+function getZipDropRate(zip) {
+  try {
+    const rows = db.prepare(`
+      SELECT listing_key, GROUP_CONCAT(DISTINCT price) as prices
+      FROM listing_snapshots
+      WHERE zip = ? AND created_at > datetime('now', '-90 days')
+      GROUP BY listing_key
+      HAVING COUNT(*) > 1
+    `).all(zip);
+    if (rows.length < 3) return null; // insufficient data
+
+    const totalKeys = db.prepare(`
+      SELECT COUNT(DISTINCT listing_key) as cnt
+      FROM listing_snapshots
+      WHERE zip = ? AND created_at > datetime('now', '-90 days')
+    `).get(zip);
+
+    const droppedCount = rows.filter(r => {
+      const prices = r.prices.split(',').map(Number);
+      return prices.length > 1 && Math.min(...prices) < Math.max(...prices);
+    }).length;
+
+    return totalKeys.cnt > 0 ? Math.round((droppedCount / totalKeys.cnt) * 100) : null;
+  } catch { return null; }
+}
+
+// ===========================================================================
+// DEAL PULSE v2 — market-aware deal scoring with historical data
 // ===========================================================================
 
 /**
  * Enrich listings with Deal Pulse metrics.
- * @param {Array} listings - Array of normalized listing objects
- * @returns {Array} listings with dealPulse, priceDropProbability, offerTiming, marketPosition
+ * @param {Array} listings - Array of normalized listing objects (with priceHistory)
+ * @param {Object|null} marketContext - RentCast market data { medianDom, medianPrice, avgPpsf, totalInventory }
+ * @returns {Array} listings with dealPulse, dealScore, priceDropProbability, offerTiming, marketPosition, biddingWarProb, daysToSellEstimate
  */
-function enrichWithDealPulse(listings) {
+function enrichWithDealPulse(listings, marketContext) {
   if (!listings.length) return listings;
 
   const withPrice = listings.filter(l => l.price > 0 && l.squareFootage > 0);
-  const medianPpsf = withPrice.length
-    ? withPrice.map(l => l.price / l.squareFootage).sort((a, b) => a - b)[Math.floor(withPrice.length / 2)]
+  const scanPpsfs = withPrice.map(l => l.price / l.squareFootage).sort((a, b) => a - b);
+  const medianPpsf = scanPpsfs.length ? scanPpsfs[Math.floor(scanPpsfs.length / 2)] : 0;
+  const marketPpsf = marketContext?.avgPpsf || 0;
+
+  // Count fast movers for bidding war signal
+  const withDom = listings.filter(l => l.daysOnMarket != null);
+  const fastMoverRatio = withDom.length
+    ? withDom.filter(l => l.daysOnMarket < 14).length / withDom.length
     : 0;
-  const avgPrice = withPrice.length
-    ? withPrice.reduce((s, l) => s + l.price, 0) / withPrice.length
-    : 0;
+
+  // Historical drop rate for this zip
+  const zip = listings[0]?.zipCode;
+  const histDropRate = zip ? getZipDropRate(zip) : null;
 
   return listings.map(listing => {
     const ppsf = listing.squareFootage > 0 ? listing.price / listing.squareFootage : 0;
     const dom = listing.daysOnMarket || 0;
+    const mDom = marketContext?.medianDom || 0;
 
-    // Price drop probability (0-100%)
-    let priceDropProb = 15; // baseline
-    if (dom > 60) priceDropProb += 35;
-    else if (dom > 30) priceDropProb += 20;
-    else if (dom > 14) priceDropProb += 8;
+    // --- Price ratio (blended scan + market when available) ---
+    let scanRatio = medianPpsf > 0 && ppsf > 0 ? ppsf / medianPpsf : 1;
+    let marketRatio = marketPpsf > 0 && ppsf > 0 ? ppsf / marketPpsf : scanRatio;
+    let blendedRatio = marketPpsf > 0 ? scanRatio * 0.6 + marketRatio * 0.4 : scanRatio;
 
-    if (medianPpsf > 0 && ppsf > 0) {
-      const priceRatio = ppsf / medianPpsf;
-      if (priceRatio > 1.15) priceDropProb += 20;
-      else if (priceRatio > 1.05) priceDropProb += 10;
-      else if (priceRatio < 0.9) priceDropProb -= 10;
-    }
-    priceDropProb = Math.max(5, Math.min(85, priceDropProb));
-
-    // Market position
+    // --- Market position ---
     let marketPosition = 'fair';
-    if (medianPpsf > 0 && ppsf > 0) {
-      const ratio = ppsf / medianPpsf;
-      if (ratio < 0.92) marketPosition = 'underpriced';
-      else if (ratio > 1.08) marketPosition = 'overpriced';
-    }
+    if (blendedRatio < 0.90) marketPosition = 'underpriced';
+    else if (blendedRatio > 1.10) marketPosition = 'overpriced';
 
-    // Offer timing
+    // --- Price drop probability ---
+    let priceDropProb = histDropRate != null ? histDropRate : 15;
+    // DOM adjustments
+    if (mDom > 0) {
+      if (dom > mDom * 2) priceDropProb += 20;
+      else if (dom > mDom * 1.5) priceDropProb += 10;
+    } else {
+      if (dom > 60) priceDropProb += 35;
+      else if (dom > 30) priceDropProb += 20;
+      else if (dom > 14) priceDropProb += 8;
+    }
+    // Price ratio adjustments
+    if (blendedRatio > 1.15) priceDropProb += 15;
+    else if (blendedRatio > 1.05) priceDropProb += 8;
+    else if (blendedRatio < 0.9) priceDropProb -= 10;
+    // Inventory pressure (buyer's market)
+    if (marketContext?.totalInventory > 300) priceDropProb += 10;
+    // Already dropped — seller is responsive
+    if (listing.priceHistory?.hasDropped) priceDropProb -= 10;
+    // Fresh listing
+    if (dom < 7) priceDropProb -= 5;
+    priceDropProb = Math.max(5, Math.min(95, priceDropProb));
+
+    // --- Offer timing ---
     let offerTiming = 'watch';
-    if (marketPosition === 'underpriced' && dom < 14) offerTiming = 'now';
-    else if (dom > 30 || priceDropProb > 45) offerTiming = 'wait';
+    if (marketPosition === 'underpriced' && mDom > 0 && dom < mDom * 0.5) offerTiming = 'now';
+    else if (priceDropProb > 55) offerTiming = 'wait';
     else if (marketPosition === 'underpriced') offerTiming = 'now';
+    else if (mDom > 0 && dom > mDom * 2) offerTiming = 'wait';
+    else if (dom > 30) offerTiming = 'wait';
 
-    // Deal Pulse rating
-    let dealPulse = 'cold';
+    // --- Deal Score (0-100) ---
     let dealScore = 50;
+    // Price efficiency
+    if (blendedRatio < 0.85) dealScore += 25;
+    else if (blendedRatio < 0.92) dealScore += 15;
+    else if (blendedRatio < 1.00) dealScore += 8;
+    else if (blendedRatio > 1.15) dealScore -= 20;
+    else if (blendedRatio > 1.08) dealScore -= 10;
 
-    // Enhanced deal score
-    if (medianPpsf > 0 && ppsf > 0) {
-      const ratio = ppsf / medianPpsf;
-      if (ratio < 0.85) dealScore += 25;
-      else if (ratio < 0.95) dealScore += 15;
-      else if (ratio < 1.05) dealScore += 5;
-      else if (ratio > 1.15) dealScore -= 15;
-      else if (ratio > 1.05) dealScore -= 5;
+    // DOM signal (market-relative)
+    if (mDom > 0) {
+      const domRatio = dom / mDom;
+      if (domRatio > 3.0) dealScore += 18;
+      else if (domRatio > 1.5) dealScore += 12;
+      else if (domRatio > 1.0) dealScore += 5;
+      else if (domRatio < 0.5) dealScore -= 5;
+    } else {
+      if (dom > 60) dealScore += 15;
+      else if (dom > 30) dealScore += 10;
+      else if (dom > 14) dealScore += 5;
     }
-    if (dom > 60) dealScore += 15;
-    else if (dom > 30) dealScore += 10;
-    else if (dom > 14) dealScore += 5;
 
+    // Historical price signal
+    if (listing.priceHistory?.hasDropped) {
+      const dropPct = parseFloat(listing.priceHistory.totalDropPercent) || 0;
+      if (dropPct > 10) dealScore += 15;
+      else if (dropPct > 5) dealScore += 10;
+      else if (dropPct > 0) dealScore += 5;
+    }
+
+    // Construction age
     if (listing.yearBuilt >= 2015) dealScore += 5;
     else if (listing.yearBuilt >= 2000) dealScore += 3;
 
-    if (priceDropProb > 50) dealScore += 8;
-    else if (priceDropProb > 30) dealScore += 4;
-
     dealScore = Math.max(0, Math.min(100, dealScore));
 
+    let dealPulse = 'cold';
     if (dealScore >= 72) dealPulse = 'hot';
     else if (dealScore >= 55) dealPulse = 'warm';
+
+    // --- Days-to-sell estimate ---
+    let daysToSellEstimate = null;
+    if (mDom > 0) {
+      let est = mDom;
+      if (marketPosition === 'underpriced') est *= 0.7;
+      else if (marketPosition === 'overpriced') est *= 1.5;
+      if (listing.priceHistory?.hasDropped) est *= 0.85;
+      daysToSellEstimate = Math.round(est);
+    }
+
+    // --- Bidding war probability ---
+    let biddingWarProb = 5;
+    if (dom < 7) biddingWarProb += 25;
+    else if (dom < 14) biddingWarProb += 15;
+    if (mDom > 0 && dom < mDom * 0.5) biddingWarProb += 10;
+    if (marketContext?.totalInventory < 100) biddingWarProb += 20;
+    else if (marketContext?.totalInventory < 200) biddingWarProb += 10;
+    if (marketPosition === 'underpriced') biddingWarProb += 15;
+    if (blendedRatio < 0.85) biddingWarProb += 10;
+    if (fastMoverRatio > 0.5) biddingWarProb += 10;
+    if (dom > 30) biddingWarProb -= 15;
+    biddingWarProb = Math.max(0, Math.min(85, biddingWarProb));
 
     return {
       ...listing,
@@ -1183,8 +1488,102 @@ function enrichWithDealPulse(listings) {
       priceDropProbability: priceDropProb,
       offerTiming,
       marketPosition,
+      daysToSellEstimate,
+      biddingWarProb,
     };
   });
+}
+
+// ===========================================================================
+// COMP NARRATIVE — human-readable market insight for listing sets
+// ===========================================================================
+
+/**
+ * Generate a comp narrative for a listing set.
+ * @param {Array} listings - Enriched listings (with Deal Pulse + priceHistory)
+ * @param {Object|null} marketContext
+ * @returns {Object} { summary, bullets, confidence }
+ */
+function generateCompNarrative(listings, marketContext) {
+  if (!listings || listings.length < 2) {
+    return { summary: 'Insufficient comparable data for narrative.', bullets: [], confidence: 'low' };
+  }
+
+  const withPrice = listings.filter(l => l.price > 0 && l.squareFootage > 0);
+  if (withPrice.length < 2) {
+    return { summary: 'Insufficient comparable data for narrative.', bullets: [], confidence: 'low' };
+  }
+
+  const prices = withPrice.map(l => l.price).sort((a, b) => a - b);
+  const ppsfs = withPrice.map(l => l.price / l.squareFootage).sort((a, b) => a - b);
+  const doms = listings.filter(l => l.daysOnMarket != null).map(l => l.daysOnMarket);
+  const medianPrice = prices[Math.floor(prices.length / 2)];
+  const medianPpsf = ppsfs[Math.floor(ppsfs.length / 2)];
+  const avgDom = doms.length ? Math.round(doms.reduce((s, d) => s + d, 0) / doms.length) : null;
+
+  const bullets = [];
+  const parts = [];
+
+  // Price range
+  const lo = prices[0] >= 1000000 ? `$${(prices[0] / 1000000).toFixed(1)}M` : `$${(prices[0] / 1000).toFixed(0)}K`;
+  const hi = prices[prices.length - 1] >= 1000000 ? `$${(prices[prices.length - 1] / 1000000).toFixed(1)}M` : `$${(prices[prices.length - 1] / 1000).toFixed(0)}K`;
+  parts.push(`${withPrice.length} comparable properties range from ${lo}-${hi}`);
+
+  // Fast movers
+  const fastMovers = listings.filter(l => l.daysOnMarket != null && l.daysOnMarket < 14);
+  if (fastMovers.length > 0) {
+    const pct = Math.round((fastMovers.length / withPrice.length) * 100);
+    bullets.push(`${fastMovers.length} of ${withPrice.length} comps listed under 14 days (${pct}% moving fast)`);
+    if (pct > 50) parts.push('with the majority moving in under 2 weeks');
+  }
+
+  // Underpriced comps
+  const underpriced = listings.filter(l => l.marketPosition === 'underpriced');
+  if (underpriced.length > 0) {
+    bullets.push(`${underpriced.length} listing${underpriced.length > 1 ? 's' : ''} priced below market median ($${medianPpsf.toFixed(0)}/sqft)`);
+  }
+
+  // Price drops detected
+  const dropped = listings.filter(l => l.priceHistory?.hasDropped);
+  if (dropped.length > 0) {
+    const avgDropPct = (dropped.reduce((s, l) => s + parseFloat(l.priceHistory.totalDropPercent), 0) / dropped.length).toFixed(1);
+    bullets.push(`${dropped.length} have already reduced price (avg -${avgDropPct}%)`);
+    parts.push(`and ${dropped.length} seller${dropped.length > 1 ? 's have' : ' has'} already cut prices`);
+  }
+
+  // Market context overlay
+  if (marketContext) {
+    const mDom = marketContext.medianDom;
+    const mPrice = marketContext.medianPrice;
+    if (mDom) {
+      bullets.push(`Market average days on market: ${mDom} days (zip-level)`);
+      if (avgDom && avgDom < mDom * 0.8) {
+        parts.push('-- this pocket is moving faster than the broader market');
+      } else if (avgDom && avgDom > mDom * 1.3) {
+        parts.push('-- this area is slower than the zip average');
+      }
+    }
+    if (mPrice && medianPrice) {
+      const diff = ((medianPrice - mPrice) / mPrice * 100).toFixed(0);
+      if (Math.abs(Number(diff)) > 5) {
+        bullets.push(`Scan median ${Number(diff) > 0 ? '+' : ''}${diff}% vs zip-level median ($${(mPrice / 1000).toFixed(0)}K)`);
+      }
+    }
+  }
+
+  // Bidding war listings
+  const biddingWar = listings.filter(l => l.biddingWarProb > 50);
+  if (biddingWar.length > 0) {
+    bullets.push(`${biddingWar.length} listing${biddingWar.length > 1 ? 's show' : ' shows'} bidding war signals`);
+  }
+
+  let confidence = 'medium';
+  if (withPrice.length >= 8 && marketContext) confidence = 'high';
+  else if (withPrice.length < 4 && !marketContext) confidence = 'low';
+
+  const summary = parts.join(', ') + '.';
+
+  return { summary, bullets, confidence };
 }
 
 // ===========================================================================
@@ -1506,13 +1905,17 @@ app.get('/api/health', (req, res) => {
   sources.zhvi = zhviLoaded ? 'active (Zillow CSV)' : 'loading...';
 
   let zhviCount = 0;
+  let snapshotCount = 0;
+  let marketCacheCount = 0;
   try { zhviCount = db.prepare('SELECT COUNT(*) as c FROM zhvi_data').get().c; } catch {}
+  try { snapshotCount = db.prepare('SELECT COUNT(*) as c FROM listing_snapshots').get().c; } catch {}
+  try { marketCacheCount = db.prepare('SELECT COUNT(*) as c FROM market_context_cache').get().c; } catch {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount },
     uptime: process.uptime(),
   });
 });

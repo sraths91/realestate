@@ -78,12 +78,33 @@ Key capabilities:
 - **Historical snapshots**: SQLite stores every query — future lookups show "up 5 points since last check"
 - **Agent-ready output**: "This neighborhood scores 55/100, trending up, driven by 3.5% price velocity and 11.3% income growth"
 
-### 6. Deal Pulse
-Intelligent deal analysis on every scanned listing:
-- **Hot / Warm / Cold** deal classification
-- Price reduction probability (%)
-- Offer timing recommendation (Now / Wait / Watch)
-- Market position indicator (Underpriced / Fair / Overpriced)
+### 6. Deal Pulse v2
+Market-aware deal analysis on every scanned listing, powered by historical data and RentCast market context:
+
+**Core Signals:**
+- **Hot / Warm / Cold** deal classification (score 0-100)
+- **Price reduction probability** — blends historical zip-level drop rates (from listing snapshots) with DOM and price ratio signals
+- **Offer timing** — Now / Wait / Watch based on market velocity and price position
+- **Market position** — Underpriced / Fair / Overpriced using blended scan + market ratios
+- **Days-to-sell estimate** — based on RentCast market median DOM, adjusted for price position
+- **Bidding war probability** — composite signal from DOM, inventory, price position, and comp velocity
+
+**Deal Score Algorithm:**
+| Factor | Max Points | Source |
+|--------|-----------|--------|
+| Price efficiency | +/-30 | Blended scan (60%) + market (40%) price/sqft ratio |
+| DOM signal | +18 | Listing DOM vs market median DOM |
+| Price history | +15 | Actual price drops from stored snapshots |
+| Construction age | +5 | Year built (2015+ = +5, 2000+ = +3) |
+
+**Comp Narrative:**
+Auto-generated market insight paragraph with supporting bullet points. Analyzes the full listing set to produce agent-ready summaries like: *"12 comparable properties range from $285K-$495K, with the majority moving in under 2 weeks, and 3 sellers have already cut prices."*
+
+**Listing Snapshots:**
+Every scan saves listings to SQLite (`listing_snapshots` table). Re-scanning the same area detects actual price reductions across visits. Historical drop rates feed back into probability calculations.
+
+**Market Context:**
+RentCast market data (median DOM, price, inventory) cached in SQLite for 7 days. When available, Deal Pulse uses market-relative scoring instead of scan-only heuristics.
 
 ### 7. Client Command Center
 Save properties, track value changes over time, and share curated lists with clients via shareable links.
@@ -128,13 +149,13 @@ Save properties, track value changes over time, and share curated lists with cli
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/property-lookup?address=` | Property details + valuation (cascade) |
-| GET | `/api/listings-lookup?location=&...` | For-sale listings with Deal Pulse (cascade) |
+| GET | `/api/listings-lookup?location=&...` | For-sale listings with Deal Pulse v2 + comp narrative |
 | GET | `/api/rentcast/market?zipCode=` | Market analytics (RentCast only) |
 | GET | `/api/momentum?zipCode=&lat=&lon=&state=` | Momentum score v2 (6 factors, Y-o-Y trends) |
 | GET | `/api/heatmap?lat=&lon=&radius=&metric=` | Tract-level heatmap data |
 | GET | `/api/geocode?q=` | Forward geocoding (Nominatim) |
 | GET | `/api/reverse-geocode?lat=&lon=` | Reverse geocoding (Nominatim) |
-| GET | `/api/health` | Server status + data sources + ZHVI count |
+| GET | `/api/health` | Server status + data sources + DB counts |
 | GET | `/api/cache/stats` | Cache entry count |
 
 ## Project Structure
@@ -143,7 +164,7 @@ Save properties, track value changes over time, and share curated lists with cli
 realtor-tool/
 ├── server.js           Express API + cache + multi-source cascade + SQLite
 ├── data/
-│   └── propscout.db    SQLite (momentum snapshots + ZHVI cache, gitignored)
+│   └── propscout.db    SQLite (4 tables: momentum_snapshots, zhvi_data, listing_snapshots, market_context_cache)
 ├── public/
 │   ├── index.html      Single-page app shell (6 tabs)
 │   ├── app.js          Frontend logic, state, rendering, demo data
@@ -199,12 +220,14 @@ When a user queries a zip code, the server:
 
 ## Roadmap
 
-### Phase 2: Make Deal Pulse Credible
-- [ ] Collect listing snapshots — store prices at scan time, detect actual reductions
-- [ ] Days-to-sell estimate from RentCast median DOM data
-- [ ] Auto-generated comp narrative ("3 of 5 comps sold above asking in <14 DOM")
-- [ ] Calibrate heuristic thresholds against historical Zillow/Redfin CSV data
-- [ ] Bidding war probability signal
+### Phase 2: Make Deal Pulse Credible ✓
+- [x] Listing snapshots in SQLite — store prices at scan time, detect actual reductions
+- [x] Days-to-sell estimate from RentCast median DOM data
+- [x] Auto-generated comp narrative with confidence levels
+- [x] Market-aware scoring — blended scan + RentCast market ratios
+- [x] Bidding war probability signal (DOM + inventory + price position)
+- [x] Historical zip-level price drop rates from snapshot database
+- [ ] Calibrate thresholds against historical Zillow/Redfin CSV data (future)
 
 ### Phase 3: Client Command Center
 - [ ] SQLite backend for saved properties (persistent, synced across devices)

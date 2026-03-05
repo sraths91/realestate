@@ -199,19 +199,60 @@ function getDemoListings(lat, lon, locationParts) {
   const city = locationParts?.city || 'Demo City';
   const st = locationParts?.state || 'XX';
   const zip = locationParts?.zip || '00000';
-  return Array.from({ length: 8 }, (_, i) => ({
-    formattedAddress: `${randBetween(100, 999)} ${STREET_NAMES[i % STREET_NAMES.length]}, ${city}, ${st} ${zip}`,
-    price: randBetween(180000, 550000),
-    squareFootage: randBetween(1100, 3400),
-    bedrooms: randBetween(2, 5),
-    bathrooms: [1, 1.5, 2, 2, 2.5, 3, 3, 3.5][i],
-    propertyType: PROP_TYPES[i % PROP_TYPES.length],
-    yearBuilt: randBetween(1985, 2020),
-    daysOnMarket: randBetween(2, 45),
-    latitude: jitterCoord(lat, 0.015),
-    longitude: jitterCoord(lon, 0.015),
-    status: 'Active',
-  }));
+  const medianPpsf = 172;
+  return Array.from({ length: 8 }, (_, i) => {
+    const price = randBetween(180000, 550000);
+    const sqft = randBetween(1100, 3400);
+    const dom = randBetween(2, 65);
+    const hasDropped = Math.random() > 0.6;
+    const dropAmt = hasDropped ? randBetween(5000, 35000) : 0;
+    const ppsf = price / sqft;
+
+    return {
+      formattedAddress: `${randBetween(100, 999)} ${STREET_NAMES[i % STREET_NAMES.length]}, ${city}, ${st} ${zip}`,
+      price,
+      squareFootage: sqft,
+      bedrooms: randBetween(2, 5),
+      bathrooms: [1, 1.5, 2, 2, 2.5, 3, 3, 3.5][i],
+      propertyType: PROP_TYPES[i % PROP_TYPES.length],
+      yearBuilt: randBetween(1985, 2020),
+      daysOnMarket: dom,
+      latitude: jitterCoord(lat, 0.015),
+      longitude: jitterCoord(lon, 0.015),
+      status: 'Active',
+      priceHistory: {
+        hasDropped,
+        totalDrop: dropAmt,
+        totalDropPercent: hasDropped ? ((dropAmt / (price + dropAmt)) * 100).toFixed(1) : '0',
+        daysSinceFirstSeen: randBetween(0, 90),
+        snapshots: [],
+        priceChanges: [],
+      },
+      biddingWarProb: dom < 10 ? randBetween(30, 70) : randBetween(5, 25),
+      daysToSellEstimate: Math.round(18 * (ppsf / medianPpsf) * (dom < 14 ? 0.7 : 1.2)),
+    };
+  });
+}
+
+/**
+ * Generate a demo comp narrative for client-side demo mode.
+ */
+function getDemoCompNarrative(listings) {
+  const withPrice = listings.filter(l => l.price > 0);
+  const prices = withPrice.map(l => l.price).sort((a, b) => a - b);
+  const fastMovers = withPrice.filter(l => l.daysOnMarket < 14);
+  const dropped = withPrice.filter(l => l.priceHistory?.hasDropped);
+  const lo = `$${(prices[0] / 1000).toFixed(0)}K`;
+  const hi = `$${(prices[prices.length - 1] / 1000).toFixed(0)}K`;
+  return {
+    summary: `${withPrice.length} comparable properties range from ${lo}-${hi}${fastMovers.length > withPrice.length / 2 ? ', with the majority moving in under 2 weeks' : ''}.`,
+    bullets: [
+      `${fastMovers.length} of ${withPrice.length} comps listed under 14 days`,
+      dropped.length > 0 ? `${dropped.length} have already reduced price` : null,
+      'Market average DOM: 18 days (demo data)',
+    ].filter(Boolean),
+    confidence: 'medium',
+  };
 }
 
 function getDemoMarket() {
@@ -612,7 +653,7 @@ async function performScan() {
       }
     } catch { /* fall back */ }
     const listings = getDemoListings(lat, lon, locationParts);
-    renderScanResults(listings);
+    renderScanResults(listings, getDemoCompNarrative(listings));
     hide('scan-loading');
     toast('Server offline — showing demo data', 'info');
     return;
@@ -642,7 +683,8 @@ async function performScan() {
         const geoData = await geoRes.json();
         if (geoData.length) { lat = parseFloat(geoData[0].lat); lon = parseFloat(geoData[0].lon); }
       } catch { /* ignore */ }
-      renderScanResults(getDemoListings(lat, lon, locationParts));
+      const demoListings = getDemoListings(lat, lon, locationParts);
+      renderScanResults(demoListings, getDemoCompNarrative(demoListings));
       hide('scan-loading');
       toast('No API keys configured — showing demo data', 'info');
       return;
@@ -669,9 +711,18 @@ async function performScan() {
       latitude: l.latitude,
       longitude: l.longitude,
       status: l.status || l.statusText,
+      // Preserve Deal Pulse fields from server
+      dealPulse: l.dealPulse,
+      dealScore: l.dealScore,
+      priceDropProbability: l.priceDropProbability,
+      offerTiming: l.offerTiming,
+      marketPosition: l.marketPosition,
+      biddingWarProb: l.biddingWarProb,
+      daysToSellEstimate: l.daysToSellEstimate,
+      priceHistory: l.priceHistory,
     }));
 
-    renderScanResults(normalized);
+    renderScanResults(normalized, data.compNarrative);
     hide('scan-loading');
 
     const cached = data.cached ? ' (cached)' : '';
@@ -684,7 +735,7 @@ async function performScan() {
   }
 }
 
-function renderScanResults(listings) {
+function renderScanResults(listings, compNarrative) {
   // Calculate analytics
   const withPrice = listings.filter((l) => l.price > 0);
   const avgPrice = withPrice.reduce((s, l) => s + l.price, 0) / (withPrice.length || 1);
@@ -748,6 +799,21 @@ function renderScanResults(listings) {
   $('scan-avg-ppsf').textContent = avgPpsf ? '$' + avgPpsf.toFixed(0) : '--';
   $('scan-best-deal').textContent = bestScore + '/100';
 
+  // Comp narrative
+  const narrativeEl = $('scan-narrative');
+  if (narrativeEl) {
+    if (compNarrative && compNarrative.bullets && compNarrative.bullets.length > 0) {
+      show('scan-narrative');
+      $('narrative-summary').textContent = compNarrative.summary;
+      const confEl = $('narrative-confidence');
+      confEl.textContent = compNarrative.confidence;
+      confEl.className = `narrative-confidence conf-${compNarrative.confidence}`;
+      $('narrative-bullets').innerHTML = compNarrative.bullets.map(b => `<li>${b}</li>`).join('');
+    } else {
+      hide('scan-narrative');
+    }
+  }
+
   // Listing cards
   const list = $('scan-list');
   list.innerHTML = '';
@@ -784,7 +850,10 @@ function renderScanResults(listings) {
         <div class="scan-deal-extras">
           <span class="deal-tag ${timingClass}">${timingLabel}</span>
           <span class="deal-tag ${posClass}">${posLabel}</span>
+          ${listing.biddingWarProb > 50 ? '<span class="deal-tag deal-tag-bidding">Likely Bidding War</span>' : listing.biddingWarProb > 25 ? '<span class="deal-tag deal-tag-bidding-possible">Possible Bidding War</span>' : ''}
+          ${listing.daysToSellEstimate ? `<span class="deal-tag deal-tag-dts">~${listing.daysToSellEstimate}d to sell</span>` : ''}
           ${listing.priceDropProbability > 25 ? `<span class="price-drop-prob">Price drop: <span class="prob-value">${listing.priceDropProbability}%</span></span>` : ''}
+          ${listing.priceHistory?.hasDropped ? `<span class="price-history-tag">&#8595; $${(listing.priceHistory.totalDrop / 1000).toFixed(0)}K (-${listing.priceHistory.totalDropPercent}%)</span>` : ''}
         </div>
       </div>
       <div class="scan-pricing">
