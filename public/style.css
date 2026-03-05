@@ -436,11 +436,104 @@ select { cursor: pointer; appearance: none;
 .factor-card .factor-detail { font-size: 0.8rem; color: var(--text-muted); }
 .factor-card .factor-weight { font-size: 0.7rem; color: var(--text-dim); margin-top: 4px; }
 
+/* Trend indicators on factor cards */
+.factor-trend { font-size: 0.85rem; margin-left: 4px; }
+.factor-trend-up { color: var(--green); }
+.factor-trend-down { color: var(--red); }
+
+/* Momentum Drivers — the "driven by" chips */
+.momentum-drivers {
+  display: flex; align-items: center; gap: 10px;
+  justify-content: center; flex-wrap: wrap;
+  margin-bottom: 20px; padding: 12px 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.drivers-label { font-size: 0.85rem; color: var(--text-muted); font-weight: 600; }
+.drivers-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.driver-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 4px 12px; border-radius: 20px;
+  font-size: 0.8rem; font-weight: 600;
+}
+.driver-chip.driver-up { background: var(--green-bg); color: var(--green); }
+.driver-chip.driver-down { background: var(--red-bg); color: var(--red); }
+
+/* ZHVI Price History */
+.momentum-zhvi {
+  margin-bottom: 20px; padding: 16px 20px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.zhvi-header {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.85rem; font-weight: 700; color: var(--text);
+  margin-bottom: 12px;
+}
+.zhvi-header svg { color: var(--accent); }
+.zhvi-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+}
+.zhvi-stat { text-align: center; }
+.zhvi-value { display: block; font-size: 1.1rem; font-weight: 800; color: var(--text); }
+.zhvi-value.zhvi-up { color: var(--green); }
+.zhvi-value.zhvi-down { color: var(--red); }
+.zhvi-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* Prior Snapshot Comparison */
+.momentum-prior {
+  display: flex; align-items: center; gap: 8px;
+  justify-content: center; flex-wrap: wrap;
+  margin-bottom: 20px; padding: 10px 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 0.85rem;
+}
+.prior-label { color: var(--text-muted); }
+.prior-diff { font-weight: 700; }
+.prior-diff.prior-up { color: var(--green); }
+.prior-diff.prior-down { color: var(--red); }
+.prior-diff.prior-same { color: var(--yellow); }
+.prior-was { color: var(--text-dim); }
+
 .momentum-meta {
   margin-top: 24px; padding: 16px; background: var(--bg-card);
   border: 1px solid var(--border); border-radius: var(--radius);
   font-size: 0.8rem; color: var(--text-dim);
 }
+
+/* ===== HEATMAP CONTROLS ===== */
+.heatmap-controls {
+  display: flex; align-items: center; gap: 16px;
+  margin-bottom: 12px; padding: 10px 16px;
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); flex-wrap: wrap;
+}
+.heatmap-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  color: var(--text-muted); white-space: nowrap;
+}
+.heatmap-toggle input[type="checkbox"] {
+  width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;
+}
+.heatmap-toggle input:checked + span { color: var(--text); }
+.heatmap-controls select {
+  width: auto; padding: 6px 28px 6px 10px; font-size: 0.85rem;
+}
+.heatmap-legend {
+  display: flex; align-items: center; gap: 8px; margin-left: auto;
+}
+.legend-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 600; }
+.legend-bar {
+  width: 120px; height: 10px; border-radius: 5px;
+  background: linear-gradient(to right, #3b82f6, #34d399, #fbbf24, #f87171);
+}
+.heatmap-stats {
+  font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 8px; align-items: center;
+}
+.heatmap-stat-label { font-weight: 600; color: var(--text-dim); }
+.heatmap-stat-range { color: var(--text); font-weight: 500; }
 
 /* ===== DEAL PULSE ===== */
 .deal-pulse-badge {
@@ -553,6 +646,9 @@ select { cursor: pointer; appearance: none;
   .saved-drawer { width: 100%; }
   .factors-grid { grid-template-columns: 1fr; }
   .momentum-search { flex-wrap: wrap; }
+  .heatmap-controls { flex-wrap: wrap; gap: 10px; }
+  .heatmap-legend { margin-left: 0; }
+  .legend-bar { width: 80px; }
 }
 @media (max-width: 640px) {
   .header-inner { gap: 8px; padding: 0 12px; }

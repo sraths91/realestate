@@ -299,6 +299,24 @@
           <button id="map-find-similar" class="btn btn-secondary" disabled>Find Similar Homes</button>
         </div>
       </div>
+      <div class="heatmap-controls" id="heatmap-controls">
+        <label class="heatmap-toggle">
+          <input type="checkbox" id="heatmap-enabled" />
+          <span>Heatmap</span>
+        </label>
+        <select id="heatmap-metric">
+          <option value="home-value">Home Value</option>
+          <option value="affordability">Affordability</option>
+          <option value="momentum">Momentum Score</option>
+          <option value="density">Population Density</option>
+        </select>
+        <div class="heatmap-legend" id="heatmap-legend">
+          <span class="legend-label legend-low">Low</span>
+          <div class="legend-bar"></div>
+          <span class="legend-label legend-high">High</span>
+        </div>
+        <div class="heatmap-stats" id="heatmap-stats"></div>
+      </div>
       <div id="main-map" class="full-map"></div>
       <div id="map-sidebar" class="map-sidebar hidden">
         <div class="sidebar-header">
@@ -369,7 +387,7 @@
     <section class="tab-panel" id="tab-momentum">
       <div class="momentum-header">
         <h1>Neighborhood Momentum</h1>
-        <p>Composite score showing which neighborhoods are trending up or down</p>
+        <p>Real trend analysis — price velocity, demographic shifts, crime direction, and demand signals</p>
         <div class="momentum-search">
           <input type="text" id="momentum-zip" placeholder="Enter Zip Code" maxlength="5" />
           <input type="text" id="momentum-state" placeholder="State (e.g. MN)" maxlength="2" />
@@ -378,7 +396,7 @@
       </div>
 
       <div id="momentum-results" class="hidden">
-        <!-- Gauge -->
+        <!-- Gauge + Trend summary -->
         <div class="momentum-gauge-section">
           <div class="momentum-gauge-wrap">
             <svg id="momentum-gauge" viewBox="0 0 200 120" class="momentum-gauge-svg">
@@ -389,11 +407,8 @@
                   <stop offset="100%" stop-color="var(--green)" />
                 </linearGradient>
               </defs>
-              <!-- Background arc -->
               <path d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="var(--border)" stroke-width="12" stroke-linecap="round" />
-              <!-- Score arc (filled dynamically) -->
               <path id="gauge-fill" d="M 20 100 A 80 80 0 0 1 180 100" fill="none" stroke="url(#gauge-gradient)" stroke-width="12" stroke-linecap="round" stroke-dasharray="0 251.3" />
-              <!-- Score text -->
               <text id="gauge-score" x="100" y="85" text-anchor="middle" fill="var(--text)" font-size="36" font-weight="800">--</text>
               <text x="100" y="105" text-anchor="middle" fill="var(--text-muted)" font-size="11">out of 100</text>
             </svg>
@@ -404,24 +419,33 @@
           </div>
         </div>
 
+        <!-- Trend Drivers — the "why" behind the score -->
+        <div id="momentum-drivers" class="momentum-drivers hidden"></div>
+
+        <!-- ZHVI Price History (if available) -->
+        <div id="momentum-zhvi" class="momentum-zhvi hidden"></div>
+
+        <!-- Prior snapshot comparison -->
+        <div id="momentum-prior" class="momentum-prior hidden"></div>
+
         <!-- Factor breakdown -->
         <div class="section-header">
           <h2>Score Breakdown</h2>
-          <p>How each factor contributes to the overall momentum</p>
+          <p>How each factor contributes — factors with arrows have real Y-o-Y trend data</p>
         </div>
         <div class="factors-grid" id="factors-grid"></div>
 
-        <!-- Raw data -->
+        <!-- Data sources + meta -->
         <div class="momentum-meta" id="momentum-meta"></div>
       </div>
 
       <div id="momentum-loading" class="loading-state hidden">
         <div class="spinner"></div>
-        <p>Analyzing neighborhood data...</p>
+        <p>Analyzing neighborhood data across 6 dimensions...</p>
       </div>
       <div id="momentum-empty" class="empty-state">
         <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.3"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        <p>Enter a zip code to see the neighborhood momentum score. Uses free public data from Census, FBI Crime, and Walk Score APIs.</p>
+        <p>Enter a zip code to get a real momentum score. Synthesizes Census ACS trends, Zillow home values, FBI crime direction, Walk Score, and school ratings into one actionable number.</p>
       </div>
     </section>
   </main>
@@ -448,6 +472,7 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

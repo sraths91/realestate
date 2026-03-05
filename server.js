@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -9,10 +11,42 @@ const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
 const WALKSCORE_KEY = process.env.WALKSCORE_API_KEY;
 const RENTCAST_BASE = 'https://api.rentcast.io/v1';
+const GREATSCHOOLS_KEY = process.env.GREATSCHOOLS_API_KEY;
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ===========================================================================
+// SQLite — persistent storage for historical momentum snapshots + ZHVI data
+// ===========================================================================
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const db = new Database(path.join(DATA_DIR, 'propscout.db'));
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS momentum_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    zip TEXT NOT NULL,
+    score INTEGER NOT NULL,
+    trend TEXT,
+    factors TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_momentum_zip ON momentum_snapshots(zip, created_at);
+
+  CREATE TABLE IF NOT EXISTS zhvi_data (
+    zip TEXT PRIMARY KEY,
+    current_value REAL,
+    value_1yr_ago REAL,
+    value_3yr_ago REAL,
+    value_5yr_ago REAL,
+    yoy_change REAL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+console.log('SQLite database initialized at', path.join(DATA_DIR, 'propscout.db'));
 
 // ===========================================================================
 // CACHE — 24-hour in-memory cache to stretch API calls
@@ -490,7 +524,8 @@ app.get('/api/rentcast/market', requireRentCast, async (req, res) => {
 });
 
 // ===========================================================================
-// MOMENTUM SCORE — Census + Walk Score + FBI Crime → composite 0-100
+// MOMENTUM SCORE v2 — Real trend analysis with multiple data sources
+// Census Y-o-Y + Zillow ZHVI + FBI Crime trends + Walk Score + Schools
 // ===========================================================================
 
 /**
@@ -502,14 +537,11 @@ async function censusApiFetch(zipCode) {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  // ACS 5-year estimates: B19013_001E = median income, B25077_001E = median home value,
-  // B01003_001E = population, B25002_003E = vacant units, B25002_001E = total units
   const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E';
   const url = `https://api.census.gov/data/2022/acs/acs5?get=${vars}&for=zip%20code%20tabulation%20area:${zipCode}`;
   const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
   if (!r.ok) throw new Error(`Census API ${r.status}`);
   const data = await r.json();
-  // Response: [[header], [values, ..., zipCode]]
   if (!data || data.length < 2) throw new Error('No census data for this zip');
   const row = data[1];
   const result = {
@@ -521,6 +553,182 @@ async function censusApiFetch(zipCode) {
   };
   cacheSet(cacheKey, result);
   return result;
+}
+
+/**
+ * Fetch Census ACS data for TWO years (2022 + 2021) to compute Y-o-Y trends.
+ * Returns { current, prior, trends } where trends has real percentage changes.
+ */
+async function censusMultiYearFetch(zipCode) {
+  const cacheKey = `census-yoy:${zipCode}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E';
+  const parseCensusRow = (row) => ({
+    medianIncome: parseInt(row[0]) || null,
+    medianHomeValue: parseInt(row[1]) || null,
+    population: parseInt(row[2]) || null,
+    vacantUnits: parseInt(row[3]) || null,
+    totalUnits: parseInt(row[4]) || null,
+  });
+
+  const fetchYear = async (year) => {
+    try {
+      const url = `https://api.census.gov/data/${year}/acs/acs5?get=${vars}&for=zip%20code%20tabulation%20area:${zipCode}`;
+      const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+      if (!r.ok) return null;
+      const data = await r.json();
+      if (!data || data.length < 2) return null;
+      return parseCensusRow(data[1]);
+    } catch { return null; }
+  };
+
+  const [current, prior] = await Promise.all([fetchYear(2022), fetchYear(2021)]);
+
+  const result = { current, prior, trends: {} };
+
+  if (current && prior) {
+    if (current.medianIncome && prior.medianIncome) {
+      result.trends.incomeChange = +((current.medianIncome - prior.medianIncome) / prior.medianIncome * 100).toFixed(1);
+    }
+    if (current.medianHomeValue && prior.medianHomeValue) {
+      result.trends.homeValueChange = +((current.medianHomeValue - prior.medianHomeValue) / prior.medianHomeValue * 100).toFixed(1);
+    }
+    if (current.population && prior.population) {
+      result.trends.populationChange = +((current.population - prior.population) / prior.population * 100).toFixed(1);
+    }
+    if (current.vacantUnits != null && prior.vacantUnits != null && current.totalUnits && prior.totalUnits) {
+      const curVac = current.vacantUnits / current.totalUnits;
+      const priorVac = prior.vacantUnits / prior.totalUnits;
+      result.trends.vacancyChange = +((curVac - priorVac) * 100).toFixed(2);
+    }
+  }
+
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Zillow ZHVI — Home Value Index CSV (free, ~30MB download)
+// ---------------------------------------------------------------------------
+const ZHVI_URL = 'https://files.zillowstatic.com/research/public_csvs/zhvi/Zip_zhvi_uc_sfrcondo_tier_0.33_0.67_sm_sa_month.csv';
+let zhviLoaded = false;
+
+/** Parse a CSV line handling quoted fields. */
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuotes = !inQuotes; }
+    else if (ch === ',' && !inQuotes) { result.push(current); current = ''; }
+    else { current += ch; }
+  }
+  result.push(current);
+  return result;
+}
+
+/** Download Zillow ZHVI CSV and load into SQLite. Runs in background. */
+async function downloadAndParseZHVI() {
+  try {
+    const check = db.prepare("SELECT COUNT(*) as count FROM zhvi_data WHERE updated_at > datetime('now', '-7 days')").get();
+    if (check.count > 1000) {
+      console.log(`ZHVI: ${check.count} zips cached (fresh)`);
+      zhviLoaded = true;
+      return;
+    }
+
+    console.log('ZHVI: downloading Zillow Home Value Index...');
+    const response = await fetch(ZHVI_URL, { headers: { 'User-Agent': 'PropScout/1.0' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const text = await response.text();
+    const lines = text.split('\n');
+    const headers = parseCSVLine(lines[0]).map(h => h.trim().replace(/"/g, ''));
+
+    // Find date columns (YYYY-MM-DD format), sorted newest first
+    const dateColumns = headers
+      .map((h, i) => ({ header: h, index: i }))
+      .filter(h => /^\d{4}-\d{2}-\d{2}$/.test(h.header))
+      .sort((a, b) => b.header.localeCompare(a.header));
+
+    if (dateColumns.length < 13) throw new Error('Insufficient date columns');
+
+    const latestCol = dateColumns[0].index;
+    const oneYearCol = dateColumns[12]?.index;
+    const threeYearCol = dateColumns[36]?.index;
+    const fiveYearCol = dateColumns[60]?.index;
+    const zipCol = headers.findIndex(h => h === 'RegionName');
+
+    const insert = db.prepare(`
+      INSERT OR REPLACE INTO zhvi_data (zip, current_value, value_1yr_ago, value_3yr_ago, value_5yr_ago, yoy_change, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    `);
+
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      const cols = parseCSVLine(lines[i]);
+      const zip = (cols[zipCol] || '').trim().replace(/"/g, '').padStart(5, '0');
+      if (zip.length !== 5 || !/^\d+$/.test(zip)) continue;
+
+      const current = parseFloat(cols[latestCol]) || null;
+      const oneYr = oneYearCol != null ? parseFloat(cols[oneYearCol]) || null : null;
+      const threeYr = threeYearCol != null ? parseFloat(cols[threeYearCol]) || null : null;
+      const fiveYr = fiveYearCol != null ? parseFloat(cols[fiveYearCol]) || null : null;
+      const yoyChange = current && oneYr ? +((current - oneYr) / oneYr * 100).toFixed(1) : null;
+
+      rows.push([zip, current, oneYr, threeYr, fiveYr, yoyChange]);
+    }
+
+    // Batch insert in a transaction
+    db.transaction(() => { for (const r of rows) insert.run(...r); })();
+
+    console.log(`ZHVI: loaded ${rows.length} zip codes (latest: ${dateColumns[0].header})`);
+    zhviLoaded = true;
+  } catch (err) {
+    console.log('ZHVI download failed (non-critical):', err.message);
+  }
+}
+
+/** Get ZHVI data for a zip code from SQLite. */
+function getZHVIData(zipCode) {
+  try {
+    return db.prepare('SELECT * FROM zhvi_data WHERE zip = ?').get(zipCode) || null;
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// GreatSchools API — school ratings by location (optional, needs API key)
+// ---------------------------------------------------------------------------
+async function fetchSchoolRatings(lat, lon) {
+  if (!GREATSCHOOLS_KEY) return null;
+  const cacheKey = `schools:${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const url = `https://gs-api.greatschools.org/nearby-schools?lat=${lat}&lon=${lon}&limit=10&radius=5`;
+    const r = await fetch(url, {
+      headers: { 'X-API-Key': GREATSCHOOLS_KEY, 'User-Agent': 'PropScout/1.0' },
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    const schools = (data.schools || []).filter(s => s.rating != null);
+    if (!schools.length) return null;
+
+    const avgRating = schools.reduce((s, sc) => s + sc.rating, 0) / schools.length;
+    const result = {
+      avgRating: +avgRating.toFixed(1),
+      schoolCount: schools.length,
+      topSchool: schools.sort((a, b) => b.rating - a.rating)[0]?.name || null,
+      topRating: schools.sort((a, b) => b.rating - a.rating)[0]?.rating || null,
+    };
+    cacheSet(cacheKey, result);
+    return result;
+  } catch { return null; }
 }
 
 /**
@@ -548,7 +756,7 @@ async function walkScoreFetch(lat, lon, address) {
 
 /**
  * Fetch FBI crime data by state abbreviation. Free, no key required.
- * Returns violent + property crime rates per 100k.
+ * Returns violent + property crime rates per 100k WITH multi-year trend data.
  */
 async function crimeApiFetch(stateAbbr) {
   if (!stateAbbr) return null;
@@ -556,86 +764,225 @@ async function crimeApiFetch(stateAbbr) {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  // FBI CDE API — state-level crime estimates
-  const url = `https://api.usa.gov/crime/fbi/cde/estimate/state/${stateAbbr.toLowerCase()}?from=2020&to=2022&API_KEY=iiHnOKfno2Mgkt5AynpvPpUQTEyxE77jo1RU8PIv`;
+  const url = `https://api.usa.gov/crime/fbi/cde/estimate/state/${stateAbbr.toLowerCase()}?from=2019&to=2022&API_KEY=iiHnOKfno2Mgkt5AynpvPpUQTEyxE77jo1RU8PIv`;
   const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
   if (!r.ok) throw new Error(`FBI Crime API ${r.status}`);
   const data = await r.json();
 
-  // Get the most recent year's data
   const results = data.results || [];
   const latest = results[results.length - 1] || {};
   const pop = latest.population || 1;
+
+  // Multi-year rates for trend analysis
+  const yearlyRates = results
+    .filter(r => r.population > 0 && r.violent_crime != null)
+    .map(r => ({
+      year: r.year,
+      rate: Math.round((r.violent_crime / r.population) * 100000),
+      propertyRate: r.property_crime ? Math.round((r.property_crime / r.population) * 100000) : null,
+    }));
+
   const result = {
     violentCrimeRate: latest.violent_crime ? Math.round((latest.violent_crime / pop) * 100000) : null,
     propertyCrimeRate: latest.property_crime ? Math.round((latest.property_crime / pop) * 100000) : null,
     year: latest.year || null,
+    yearlyRates,
   };
   cacheSet(cacheKey, result);
   return result;
 }
 
 /**
- * Compute composite momentum score (0-100).
- * Weights: priceTrend 25%, walkability 15%, safety 20%, income 15%, affordability 25%
+ * Compute composite momentum score v2 (0-100) with REAL trend analysis.
+ * Uses multi-year Census data, Zillow ZHVI price velocity, FBI crime trends,
+ * Walk Score, and optional school ratings.
+ *
+ * @param {object} censusData - { current, prior, trends } from censusMultiYearFetch
+ * @param {object} walkScore - Walk Score API result
+ * @param {object} crime - FBI crime data with yearlyRates
+ * @param {object|null} zhvi - Zillow ZHVI data { current_value, yoy_change, ... }
+ * @param {object|null} schools - GreatSchools ratings
+ * @returns {{ overallScore, trend, factors, drivers, dataSources }}
  */
-function computeMomentumScore(census, walkScore, crime) {
+function computeMomentumScore(censusData, walkScore, crime, zhvi, schools) {
+  const census = censusData?.current;
+  const trends = censusData?.trends || {};
   const factors = [];
+  const dataSources = [];
 
-  // 1. Affordability (25%) — income-to-price ratio
-  //    National median: ~$75k income, ~$300k home → ratio ~0.25
-  //    Higher ratio = more affordable = better score
-  let affordabilityScore = 50;
+  // === 1. Price Velocity (25%) — real Y-o-Y home value change ===
+  let priceScore = 50;
+  let priceDetail = 'No price trend data';
+  let priceTrend = 'stable';
+
+  if (zhvi?.yoy_change != null) {
+    // ZHVI: -10% → 20, 0% → 50, +5% → 65, +15% → 95
+    priceScore = Math.min(100, Math.max(0, Math.round(50 + zhvi.yoy_change * 3)));
+    const dir = zhvi.yoy_change >= 0 ? '+' : '';
+    priceDetail = `${dir}${zhvi.yoy_change.toFixed(1)}% Y-o-Y`;
+    if (zhvi.current_value) priceDetail += ` (Zillow: $${Math.round(zhvi.current_value / 1000)}K)`;
+    priceTrend = zhvi.yoy_change > 2 ? 'up' : zhvi.yoy_change < -2 ? 'down' : 'stable';
+    dataSources.push('Zillow ZHVI');
+  } else if (trends.homeValueChange != null) {
+    priceScore = Math.min(100, Math.max(0, Math.round(50 + trends.homeValueChange * 3)));
+    const dir = trends.homeValueChange >= 0 ? '+' : '';
+    priceDetail = `${dir}${trends.homeValueChange}% Y-o-Y (Census ACS)`;
+    priceTrend = trends.homeValueChange > 2 ? 'up' : trends.homeValueChange < -2 ? 'down' : 'stable';
+  } else if (census?.vacantUnits != null && census?.totalUnits > 0) {
+    const vacRate = census.vacantUnits / census.totalUnits;
+    priceScore = Math.min(100, Math.max(0, Math.round(100 - vacRate * 500)));
+    priceDetail = `${(vacRate * 100).toFixed(1)}% vacancy (proxy)`;
+  }
+  factors.push({ name: 'Price Velocity', score: priceScore, weight: 0.25, detail: priceDetail, trend: priceTrend });
+
+  // === 2. Affordability (20%) — income/price ratio ===
+  let affordScore = 50;
+  let affordDetail = 'No data available';
   if (census?.medianIncome && census?.medianHomeValue && census.medianHomeValue > 0) {
     const ratio = census.medianIncome / census.medianHomeValue;
-    // ratio 0.4+ = excellent (100), 0.25 = average (50), 0.1 = poor (10)
-    affordabilityScore = Math.min(100, Math.max(0, Math.round(ratio * 250)));
+    affordScore = Math.min(100, Math.max(0, Math.round(ratio * 250)));
+    affordDetail = `$${(census.medianHomeValue / 1000).toFixed(0)}K home vs $${(census.medianIncome / 1000).toFixed(0)}K income`;
   }
-  factors.push({ name: 'Affordability', score: affordabilityScore, weight: 0.25, detail: census?.medianHomeValue ? `Median home $${(census.medianHomeValue / 1000).toFixed(0)}K vs income $${(census.medianIncome / 1000).toFixed(0)}K` : 'No data available' });
+  factors.push({ name: 'Affordability', score: affordScore, weight: 0.20, detail: affordDetail });
 
-  // 2. Price Trend (25%) — based on vacancy rate as proxy
-  //    Lower vacancy = higher demand = positive trend
-  let priceTrendScore = 50;
-  if (census?.vacantUnits != null && census?.totalUnits > 0) {
-    const vacancyRate = census.vacantUnits / census.totalUnits;
-    // 2% vacancy = hot market (90), 10% = average (50), 20%+ = cold (10)
-    priceTrendScore = Math.min(100, Math.max(0, Math.round(100 - vacancyRate * 500)));
-  }
-  factors.push({ name: 'Price Trend', score: priceTrendScore, weight: 0.25, detail: census?.totalUnits ? `${((census.vacantUnits / census.totalUnits) * 100).toFixed(1)}% vacancy rate` : 'Based on market indicators' });
-
-  // 3. Safety (20%) — inverse of crime rate
-  //    National avg violent crime: ~380 per 100k
+  // === 3. Safety (15%) — crime rate + multi-year direction ===
   let safetyScore = 50;
+  let safetyDetail = 'No crime data';
+  let safetyTrend = 'stable';
   if (crime?.violentCrimeRate != null) {
-    // 100/100k = very safe (95), 380/100k = average (50), 800+ = poor (10)
     safetyScore = Math.min(100, Math.max(0, Math.round(100 - (crime.violentCrimeRate / 8))));
-  }
-  factors.push({ name: 'Safety', score: safetyScore, weight: 0.20, detail: crime?.violentCrimeRate ? `${crime.violentCrimeRate} violent crimes per 100K` : 'State-level estimate' });
+    safetyDetail = `${crime.violentCrimeRate} violent crimes/100K`;
+    dataSources.push('FBI Crime Data');
 
-  // 4. Walkability (15%)
-  let walkabilityScore = 50;
-  if (walkScore?.walkscore != null) {
-    walkabilityScore = walkScore.walkscore;
+    if (crime.yearlyRates?.length >= 2) {
+      const first = crime.yearlyRates[0].rate;
+      const last = crime.yearlyRates[crime.yearlyRates.length - 1].rate;
+      const changePercent = ((last - first) / first * 100).toFixed(0);
+      if (last < first * 0.95) {
+        safetyTrend = 'up';
+        safetyDetail += ` (↓${Math.abs(changePercent)}% since ${crime.yearlyRates[0].year})`;
+      } else if (last > first * 1.05) {
+        safetyTrend = 'down';
+        safetyDetail += ` (↑${changePercent}% since ${crime.yearlyRates[0].year})`;
+      } else {
+        safetyDetail += ` (stable since ${crime.yearlyRates[0].year})`;
+      }
+    }
   }
-  factors.push({ name: 'Walkability', score: walkabilityScore, weight: 0.15, detail: walkScore?.description || (WALKSCORE_KEY ? 'Score unavailable' : 'Add WALKSCORE_API_KEY for data') });
+  factors.push({ name: 'Safety', score: safetyScore, weight: 0.15, detail: safetyDetail, trend: safetyTrend });
 
-  // 5. Income (15%) — median income relative to national ($75k)
+  // === 4. Demand Signals (15%) — vacancy change + population growth ===
+  let demandScore = 50;
+  let demandDetail = 'No demand data';
+  let demandTrend = 'stable';
+  if (trends.vacancyChange != null || trends.populationChange != null) {
+    let points = 50;
+    const parts = [];
+    if (trends.vacancyChange != null) {
+      points += -trends.vacancyChange * 20;
+      const dir = trends.vacancyChange >= 0 ? '+' : '';
+      parts.push(`vacancy ${dir}${trends.vacancyChange}pp`);
+      if (trends.vacancyChange < -0.5) demandTrend = 'up';
+      else if (trends.vacancyChange > 0.5) demandTrend = 'down';
+    }
+    if (trends.populationChange != null) {
+      points += trends.populationChange * 5;
+      const dir = trends.populationChange >= 0 ? '+' : '';
+      parts.push(`population ${dir}${trends.populationChange}%`);
+      if (demandTrend === 'stable') {
+        if (trends.populationChange > 1) demandTrend = 'up';
+        else if (trends.populationChange < -1) demandTrend = 'down';
+      }
+    }
+    demandScore = Math.min(100, Math.max(0, Math.round(points)));
+    demandDetail = parts.join(', ');
+    dataSources.push('Census ACS (Y-o-Y)');
+  }
+  factors.push({ name: 'Demand Signals', score: demandScore, weight: 0.15, detail: demandDetail, trend: demandTrend });
+
+  // === 5. Income Growth (15%) — Y-o-Y income change ===
   let incomeScore = 50;
-  if (census?.medianIncome) {
-    // $50k = 33, $75k = 50, $100k = 67, $150k = 100
+  let incomeDetail = 'No income data';
+  let incomeTrend = 'stable';
+  if (trends.incomeChange != null) {
+    incomeScore = Math.min(100, Math.max(0, Math.round(50 + trends.incomeChange * 5)));
+    const dir = trends.incomeChange >= 0 ? '+' : '';
+    incomeDetail = `${dir}${trends.incomeChange}% Y-o-Y`;
+    if (census?.medianIncome) incomeDetail += ` ($${(census.medianIncome / 1000).toFixed(0)}K)`;
+    incomeTrend = trends.incomeChange > 2 ? 'up' : trends.incomeChange < -2 ? 'down' : 'stable';
+  } else if (census?.medianIncome) {
     incomeScore = Math.min(100, Math.max(0, Math.round((census.medianIncome / 150000) * 100)));
+    incomeDetail = `$${(census.medianIncome / 1000).toFixed(0)}K median household`;
   }
-  factors.push({ name: 'Income', score: incomeScore, weight: 0.15, detail: census?.medianIncome ? `$${(census.medianIncome / 1000).toFixed(0)}K median household` : 'No data available' });
+  factors.push({ name: 'Income Growth', score: incomeScore, weight: 0.15, detail: incomeDetail, trend: incomeTrend });
+
+  // === 6. Walkability (10%) — or Schools if available ===
+  if (schools?.avgRating != null) {
+    const schoolScore = Math.min(100, Math.round(schools.avgRating * 10));
+    factors.push({
+      name: 'Schools', score: schoolScore, weight: 0.05,
+      detail: `${schools.avgRating}/10 avg (${schools.schoolCount} nearby)`,
+    });
+    dataSources.push('GreatSchools');
+    // Give walkability remaining 5%
+    let walkVal = 50;
+    let walkDet = WALKSCORE_KEY ? 'Score unavailable' : 'Add WALKSCORE_API_KEY';
+    if (walkScore?.walkscore != null) {
+      walkVal = walkScore.walkscore;
+      walkDet = walkScore.description || `Walk Score: ${walkScore.walkscore}`;
+      dataSources.push('Walk Score');
+    }
+    factors.push({ name: 'Walkability', score: walkVal, weight: 0.05, detail: walkDet });
+  } else {
+    let walkVal = 50;
+    let walkDet = WALKSCORE_KEY ? 'Score unavailable' : 'Add WALKSCORE_API_KEY for data';
+    if (walkScore?.walkscore != null) {
+      walkVal = walkScore.walkscore;
+      walkDet = walkScore.description || `Walk Score: ${walkScore.walkscore}`;
+      dataSources.push('Walk Score');
+    }
+    factors.push({ name: 'Walkability', score: walkVal, weight: 0.10, detail: walkDet });
+  }
 
   // Weighted average
   const overall = Math.round(factors.reduce((sum, f) => sum + f.score * f.weight, 0));
 
-  // Trend direction
+  // Real trend direction — weighted vote from factors with directional data
+  const trendVotes = factors.filter(f => f.trend);
+  const trendValue = trendVotes.reduce((sum, f) => {
+    const tv = f.trend === 'up' ? 1 : f.trend === 'down' ? -1 : 0;
+    return sum + tv * f.weight;
+  }, 0);
   let trend = 'stable';
-  if (overall >= 65) trend = 'up';
-  else if (overall <= 35) trend = 'down';
+  if (trendValue > 0.08) trend = 'up';
+  else if (trendValue < -0.08) trend = 'down';
 
-  return { overallScore: overall, trend, factors };
+  // Human-readable drivers: "driven by +4.2% price growth and declining crime"
+  const drivers = factors
+    .filter(f => f.trend === 'up' || f.trend === 'down')
+    .map(f => ({ name: f.name, direction: f.trend, detail: f.detail }))
+    .slice(0, 3);
+
+  return { overallScore: overall, trend, factors, drivers, dataSources };
+}
+
+/** Save a momentum snapshot to SQLite for historical tracking. */
+function saveMomentumSnapshot(zipCode, score, trend, factors) {
+  try {
+    db.prepare('INSERT INTO momentum_snapshots (zip, score, trend, factors) VALUES (?, ?, ?, ?)')
+      .run(zipCode, score, trend, JSON.stringify(factors));
+  } catch (err) {
+    console.log('Snapshot save failed:', err.message);
+  }
+}
+
+/** Get the most recent prior snapshot for comparison. */
+function getPriorSnapshot(zipCode) {
+  try {
+    return db.prepare(
+      'SELECT score, trend, factors, created_at FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1 OFFSET 1'
+    ).get(zipCode) || null;
+  } catch { return null; }
 }
 
 app.get('/api/momentum', async (req, res) => {
@@ -643,42 +990,78 @@ app.get('/api/momentum', async (req, res) => {
     const { zipCode, lat, lon, state } = req.query;
     if (!zipCode) return res.status(400).json({ error: 'Missing zipCode parameter' });
 
-    const cacheKey = `momentum:${zipCode}`;
+    const cacheKey = `momentum-v2:${zipCode}`;
     const cached = cacheGet(cacheKey);
     if (cached) return res.json({ ...cached, cached: true });
 
-    let census = null, walkScore = null, crime = null;
     const errors = [];
+    const latF = lat ? parseFloat(lat) : null;
+    const lonF = lon ? parseFloat(lon) : null;
 
-    // Fetch all data sources in parallel
-    const [censusResult, walkResult, crimeResult] = await Promise.allSettled([
-      censusApiFetch(zipCode),
-      lat && lon ? walkScoreFetch(parseFloat(lat), parseFloat(lon), '') : Promise.resolve(null),
+    // Fetch ALL data sources in parallel
+    const [censusResult, walkResult, crimeResult, schoolResult] = await Promise.allSettled([
+      censusMultiYearFetch(zipCode),
+      latF && lonF ? walkScoreFetch(latF, lonF, '') : Promise.resolve(null),
       state ? crimeApiFetch(state) : Promise.resolve(null),
+      latF && lonF ? fetchSchoolRatings(latF, lonF) : Promise.resolve(null),
     ]);
 
-    if (censusResult.status === 'fulfilled') census = censusResult.value;
-    else errors.push('Census: ' + censusResult.reason?.message);
+    const censusData = censusResult.status === 'fulfilled' ? censusResult.value : null;
+    if (censusResult.status === 'rejected') errors.push('Census: ' + censusResult.reason?.message);
 
-    if (walkResult.status === 'fulfilled') walkScore = walkResult.value;
-    else errors.push('Walk Score: ' + walkResult.reason?.message);
+    const walkData = walkResult.status === 'fulfilled' ? walkResult.value : null;
+    if (walkResult.status === 'rejected') errors.push('Walk Score: ' + walkResult.reason?.message);
 
-    if (crimeResult.status === 'fulfilled') crime = crimeResult.value;
-    else errors.push('Crime: ' + crimeResult.reason?.message);
+    const crimeData = crimeResult.status === 'fulfilled' ? crimeResult.value : null;
+    if (crimeResult.status === 'rejected') errors.push('Crime: ' + crimeResult.reason?.message);
 
-    // If we got no data at all, return demo
-    if (!census && !walkScore && !crime) {
-      return res.json({
-        demo: true,
-        zipCode,
-        ...getDemoMomentum(),
-      });
+    const schoolData = schoolResult.status === 'fulfilled' ? schoolResult.value : null;
+
+    // ZHVI lookup (instant, from SQLite)
+    const zhviData = getZHVIData(zipCode);
+
+    // If no data at all, return demo
+    if (!censusData?.current && !walkData && !crimeData && !zhviData) {
+      return res.json({ demo: true, zipCode, ...getDemoMomentum() });
+    }
+
+    const momentum = computeMomentumScore(censusData, walkData, crimeData, zhviData, schoolData);
+
+    // Save snapshot for historical tracking
+    saveMomentumSnapshot(zipCode, momentum.overallScore, momentum.trend, momentum.factors);
+
+    // Get prior snapshot for comparison
+    const priorSnapshot = getPriorSnapshot(zipCode);
+
+    // Build ZHVI mini-summary for response
+    let zhviSummary = null;
+    if (zhviData) {
+      zhviSummary = {
+        currentValue: zhviData.current_value,
+        yoyChange: zhviData.yoy_change,
+        value1YrAgo: zhviData.value_1yr_ago,
+        value3YrAgo: zhviData.value_3yr_ago,
+        value5YrAgo: zhviData.value_5yr_ago,
+      };
     }
 
     const result = {
       zipCode,
-      ...computeMomentumScore(census, walkScore, crime),
-      rawData: { census, walkScore, crime },
+      ...momentum,
+      zhvi: zhviSummary,
+      priorSnapshot: priorSnapshot ? {
+        score: priorSnapshot.score,
+        trend: priorSnapshot.trend,
+        date: priorSnapshot.created_at,
+      } : null,
+      rawData: {
+        census: censusData?.current || null,
+        censusPrior: censusData?.prior || null,
+        censusTrends: censusData?.trends || null,
+        walkScore: walkData,
+        crime: crimeData,
+        schools: schoolData,
+      },
       errors: errors.length ? errors : undefined,
     };
 
@@ -689,17 +1072,28 @@ app.get('/api/momentum', async (req, res) => {
   }
 });
 
-/** Demo momentum data for when APIs are unavailable. */
+/** Demo momentum data when APIs are unavailable. */
 function getDemoMomentum() {
-  const scores = [
-    { name: 'Affordability', score: 62, weight: 0.25, detail: 'Median home $285K vs income $72K' },
-    { name: 'Price Trend', score: 71, weight: 0.25, detail: '5.8% vacancy rate — moderate demand' },
-    { name: 'Safety', score: 58, weight: 0.20, detail: '335 violent crimes per 100K' },
-    { name: 'Walkability', score: 45, weight: 0.15, detail: 'Car-Dependent' },
-    { name: 'Income', score: 48, weight: 0.15, detail: '$72K median household' },
+  const factors = [
+    { name: 'Price Velocity', score: 68, weight: 0.25, detail: '+4.2% Y-o-Y (Zillow: $325K)', trend: 'up' },
+    { name: 'Affordability', score: 55, weight: 0.20, detail: '$285K home vs $72K income' },
+    { name: 'Safety', score: 62, weight: 0.15, detail: '305 violent crimes/100K (↓8% since 2019)', trend: 'up' },
+    { name: 'Demand Signals', score: 58, weight: 0.15, detail: 'vacancy -0.3pp, population +0.8%', trend: 'up' },
+    { name: 'Income Growth', score: 54, weight: 0.15, detail: '+3.1% Y-o-Y ($72K)', trend: 'up' },
+    { name: 'Walkability', score: 45, weight: 0.10, detail: 'Car-Dependent' },
   ];
-  const overall = Math.round(scores.reduce((s, f) => s + f.score * f.weight, 0));
-  return { overallScore: overall, trend: 'up', factors: scores };
+  const overall = Math.round(factors.reduce((s, f) => s + f.score * f.weight, 0));
+  return {
+    overallScore: overall,
+    trend: 'up',
+    factors,
+    drivers: [
+      { name: 'Price Velocity', direction: 'up', detail: '+4.2% Y-o-Y' },
+      { name: 'Safety', direction: 'up', detail: 'Crime declining' },
+      { name: 'Income Growth', direction: 'up', detail: '+3.1% Y-o-Y' },
+    ],
+    dataSources: ['Demo Data'],
+  };
 }
 
 // ===========================================================================
@@ -794,6 +1188,263 @@ function enrichWithDealPulse(listings) {
 }
 
 // ===========================================================================
+// HEATMAP — Census tract-level data for neighborhood heatmap overlay
+// ===========================================================================
+
+/**
+ * FCC Census Area API — map lat/lon → state FIPS + county FIPS.
+ * Free, no key required.
+ */
+async function fccGeocode(lat, lon) {
+  const cacheKey = `fcc:${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const url = `https://geo.fcc.gov/api/census/area?format=json&lat=${lat}&lon=${lon}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) throw new Error(`FCC API ${r.status}`);
+  const data = await r.json();
+  if (!data.results || !data.results.length) throw new Error('No FCC results');
+
+  const raw = data.results[0];
+  // county_fips from FCC is full 5-digit (state+county, e.g. "27053")
+  // Census API needs just the 3-digit county part (e.g. "053")
+  const countyFips3 = raw.county_fips.length > 3
+    ? raw.county_fips.substring(raw.state_fips.length)
+    : raw.county_fips;
+  const result = {
+    stateFips: raw.state_fips,
+    countyFips: countyFips3,
+    blockFips: raw.block_fips,
+  };
+  cacheSet(cacheKey, result);
+  return result;
+}
+
+/**
+ * Batch-fetch Census ACS data for ALL tracts in a county.
+ * Returns array of tract objects with economic data.
+ */
+async function censusTractFetch(stateFips, countyFips) {
+  const cacheKey = `census-tracts:${stateFips}:${countyFips}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+
+  const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E';
+  const url = `https://api.census.gov/data/2022/acs/acs5?get=${vars}&for=tract:*&in=state:${stateFips}&in=county:${countyFips}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) throw new Error(`Census Tract API ${r.status}`);
+  const data = await r.json();
+
+  if (!data || data.length < 2) throw new Error('No tract data for this county');
+
+  // data[0] = headers, data[1..n] = rows
+  const tracts = data.slice(1).map(row => ({
+    medianIncome: parseInt(row[0]) || null,
+    medianHomeValue: parseInt(row[1]) || null,
+    population: parseInt(row[2]) || null,
+    vacantUnits: parseInt(row[3]) || null,
+    totalUnits: parseInt(row[4]) || null,
+    state: row[5],
+    county: row[6],
+    tract: row[7],
+  }));
+
+  cacheSet(cacheKey, tracts);
+  return tracts;
+}
+
+/**
+ * Generate demo heatmap data when APIs are unavailable.
+ */
+function getDemoHeatmap(lat, lon, metric) {
+  const points = [];
+  const count = 35;
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    const dist = 0.005 + Math.random() * 0.02;
+    const pLat = lat + Math.cos(angle) * dist + (Math.random() - 0.5) * 0.008;
+    const pLon = lon + Math.sin(angle) * dist + (Math.random() - 0.5) * 0.008;
+    const intensity = 0.15 + Math.random() * 0.85;
+    points.push([pLat, pLon, +intensity.toFixed(3)]);
+  }
+  return {
+    points,
+    metric,
+    demo: true,
+    stats: { min: 0.15, max: 1.0, avg: 0.55 },
+  };
+}
+
+app.get('/api/heatmap', async (req, res) => {
+  try {
+    const { lat, lon, radius, metric } = req.query;
+    if (!lat || !lon) return res.status(400).json({ error: 'Missing lat/lon' });
+
+    const centerLat = parseFloat(lat);
+    const centerLon = parseFloat(lon);
+    const radiusMiles = parseFloat(radius) || 5;
+    const chosenMetric = metric || 'home-value';
+
+    const cacheKey = `heatmap:${centerLat.toFixed(3)},${centerLon.toFixed(3)}:${radiusMiles}:${chosenMetric}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ ...cached, cached: true });
+
+    // Generate a 7x7 grid of sample points covering the radius
+    const degreesPerMileLat = 1 / 69;
+    const degreesPerMileLon = 1 / (69 * Math.cos(centerLat * Math.PI / 180));
+    const gridSize = 7;
+    const step = (radiusMiles * 2) / (gridSize - 1);
+
+    // Step 1: FCC-geocode grid points to find unique state+county pairs
+    const countySet = new Map(); // key: "state:county" → { stateFips, countyFips }
+    const gridPointTracts = []; // { lat, lon, stateFips, countyFips, blockFips }
+
+    const gridPromises = [];
+    for (let i = 0; i < gridSize; i++) {
+      for (let j = 0; j < gridSize; j++) {
+        const pLat = centerLat + (i - Math.floor(gridSize / 2)) * step * degreesPerMileLat;
+        const pLon = centerLon + (j - Math.floor(gridSize / 2)) * step * degreesPerMileLon;
+        gridPromises.push(
+          fccGeocode(pLat, pLon)
+            .then(fcc => {
+              gridPointTracts.push({ lat: pLat, lon: pLon, ...fcc });
+              const key = `${fcc.stateFips}:${fcc.countyFips}`;
+              if (!countySet.has(key)) {
+                countySet.set(key, { stateFips: fcc.stateFips, countyFips: fcc.countyFips });
+              }
+            })
+            .catch(() => { /* skip points that fail geocoding */ })
+        );
+      }
+    }
+    await Promise.all(gridPromises);
+
+    if (countySet.size === 0) {
+      // FCC geocoding failed — return demo data
+      return res.json(getDemoHeatmap(centerLat, centerLon, chosenMetric));
+    }
+
+    // Step 2: Batch-fetch Census tract data for each unique county
+    const allTracts = [];
+    const tractFetches = [];
+    for (const { stateFips, countyFips } of countySet.values()) {
+      tractFetches.push(
+        censusTractFetch(stateFips, countyFips)
+          .then(tracts => allTracts.push(...tracts))
+          .catch(err => console.log(`Census tract fetch failed for ${stateFips}/${countyFips}:`, err.message))
+      );
+    }
+    await Promise.all(tractFetches);
+
+    if (allTracts.length === 0) {
+      return res.json(getDemoHeatmap(centerLat, centerLon, chosenMetric));
+    }
+
+    // Step 3: Map grid points to tracts and compute centroids
+    // blockFips format: state(2) + county(3) + tract(6) + block(4) = 15 digits
+    // Extract tract code from blockFips
+    const tractCentroids = new Map(); // key: "state:county:tract" → { latSum, lonSum, count }
+    for (const gp of gridPointTracts) {
+      // blockFips is 15 digits: 2(state) + 3(county) + 6(tract) + 4(block)
+      const tractCode = gp.blockFips.substring(5, 11);
+      const key = `${gp.stateFips}:${gp.countyFips}:${tractCode}`;
+      if (!tractCentroids.has(key)) {
+        tractCentroids.set(key, { latSum: 0, lonSum: 0, count: 0 });
+      }
+      const c = tractCentroids.get(key);
+      c.latSum += gp.lat;
+      c.lonSum += gp.lon;
+      c.count++;
+    }
+
+    // Step 4: Compute metric values and build heatmap points
+    // Build lookup: "state:county:tract" → tract data
+    const tractLookup = new Map();
+    for (const t of allTracts) {
+      tractLookup.set(`${t.state}:${t.county}:${t.tract}`, t);
+    }
+
+    // Collect raw values for normalization
+    const rawValues = [];
+    const rawPoints = [];
+
+    for (const [key, centroid] of tractCentroids) {
+      const tractData = tractLookup.get(key);
+      if (!tractData) continue;
+
+      const avgLat = centroid.latSum / centroid.count;
+      const avgLon = centroid.lonSum / centroid.count;
+
+      let rawValue = null;
+      switch (chosenMetric) {
+        case 'home-value':
+          rawValue = tractData.medianHomeValue;
+          break;
+        case 'affordability':
+          if (tractData.medianIncome && tractData.medianHomeValue && tractData.medianHomeValue > 0) {
+            rawValue = tractData.medianIncome / tractData.medianHomeValue;
+          }
+          break;
+        case 'momentum':
+          rawValue = computeMomentumScore({ current: tractData, prior: null, trends: {} }, null, null, null, null).overallScore;
+          break;
+        case 'density':
+          rawValue = tractData.population;
+          break;
+        default:
+          rawValue = tractData.medianHomeValue;
+      }
+
+      if (rawValue != null && rawValue > 0) {
+        rawValues.push(rawValue);
+        rawPoints.push({ lat: avgLat, lon: avgLon, value: rawValue });
+      }
+    }
+
+    if (rawPoints.length === 0) {
+      return res.json(getDemoHeatmap(centerLat, centerLon, chosenMetric));
+    }
+
+    // Normalize values to 0-1 range
+    const minVal = Math.min(...rawValues);
+    const maxVal = Math.max(...rawValues);
+    const range = maxVal - minVal || 1;
+
+    const points = rawPoints.map(p => [
+      +p.lat.toFixed(5),
+      +p.lon.toFixed(5),
+      +((p.value - minVal) / range).toFixed(3),
+    ]);
+
+    const avg = rawValues.reduce((s, v) => s + v, 0) / rawValues.length;
+
+    // Preserve precision for small-value metrics (affordability ratios)
+    const fmtStat = (v) => Math.abs(v) < 10 ? +v.toFixed(3) : Math.round(v);
+
+    const result = {
+      points,
+      metric: chosenMetric,
+      tractCount: rawPoints.length,
+      stats: {
+        min: fmtStat(minVal),
+        max: fmtStat(maxVal),
+        avg: fmtStat(avg),
+      },
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
+  } catch (err) {
+    console.log('Heatmap error:', err.message);
+    // Fallback to demo
+    const centerLat = parseFloat(req.query.lat) || 39.83;
+    const centerLon = parseFloat(req.query.lon) || -98.58;
+    res.json(getDemoHeatmap(centerLat, centerLon, req.query.metric || 'home-value'));
+  }
+});
+
+// ===========================================================================
 // Geocoding (OpenStreetMap Nominatim — free, no key)
 // ===========================================================================
 app.get('/api/geocode', async (req, res) => {
@@ -845,15 +1496,23 @@ app.get('/api/health', (req, res) => {
     sources.realtor = 'not configured (needs RAPIDAPI_KEY)';
   }
   sources.rentcast = RENTCAST_KEY ? 'active' : 'not configured';
-  sources.census = 'active (free)';
+  sources.census = 'active (free, multi-year Y-o-Y)';
   sources.walkscore = WALKSCORE_KEY ? 'active' : 'not configured';
-  sources.crime = 'active (free)';
+  sources.greatschools = GREATSCHOOLS_KEY ? 'active' : 'not configured';
+  sources.crime = 'active (free, multi-year trends)';
   sources.geocoding = 'active (free)';
+  sources.fccGeocode = 'active (free)';
+  sources.censusTract = 'active (free)';
+  sources.zhvi = zhviLoaded ? 'active (Zillow CSV)' : 'loading...';
+
+  let zhviCount = 0;
+  try { zhviCount = db.prepare('SELECT COUNT(*) as c FROM zhvi_data').get().c; } catch {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
+    database: { zhviZips: zhviCount },
     uptime: process.uptime(),
   });
 });
@@ -865,15 +1524,23 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`\nPropScout running at http://localhost:${PORT}\n`);
-  console.log('Data sources (cascade order):');
+  console.log('Data sources:');
   if (RAPIDAPI_KEY) {
-    console.log('  1. Zillow (RapidAPI): ACTIVE');
-    console.log('  2. Realtor.com (RapidAPI): ACTIVE');
+    console.log('  Zillow (RapidAPI): ACTIVE');
+    console.log('  Realtor.com (RapidAPI): ACTIVE');
   } else {
-    console.log('  1. Zillow (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
-    console.log('  2. Realtor.com (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
+    console.log('  Zillow (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
+    console.log('  Realtor.com (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
   }
-  if (RENTCAST_KEY) console.log('  3. RentCast: ACTIVE');
-  else console.log('  3. RentCast: not configured — add RENTCAST_API_KEY to .env');
+  if (RENTCAST_KEY) console.log('  RentCast: ACTIVE');
+  else console.log('  RentCast: not configured — add RENTCAST_API_KEY to .env');
+  console.log('  Census ACS (free): multi-year Y-o-Y comparison');
+  console.log('  FBI Crime (free): multi-year trend analysis');
+  if (WALKSCORE_KEY) console.log('  Walk Score: ACTIVE');
+  if (GREATSCHOOLS_KEY) console.log('  GreatSchools: ACTIVE');
+  console.log(`  SQLite: ${path.join(DATA_DIR, 'propscout.db')}`);
   console.log('  Cache: 24-hour TTL\n');
+
+  // Download Zillow ZHVI data in background (non-blocking)
+  downloadAndParseZHVI();
 });

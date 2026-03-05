@@ -17,6 +17,9 @@ const state = {
   savedProperties: [],
   lastSearchProperty: null,
   lastSearchValuation: null,
+  heatLayer: null,
+  heatEnabled: false,
+  heatMetric: 'home-value',
 };
 
 // ---------------------------------------------------------------------------
@@ -29,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initMap();
   initAnalytics();
   initMomentum();
+  initHeatmap();
   initSaved();
   checkApiStatus();
 });
@@ -997,6 +1001,142 @@ function renderMapSidebar(listings) {
 }
 
 // ---------------------------------------------------------------------------
+// HEATMAP OVERLAY (Census Tract Data)
+// ---------------------------------------------------------------------------
+function initHeatmap() {
+  const toggle = $('heatmap-enabled');
+  const metricSelect = $('heatmap-metric');
+
+  toggle.addEventListener('change', () => {
+    state.heatEnabled = toggle.checked;
+    if (state.heatEnabled) {
+      loadHeatmapData();
+    } else {
+      removeHeatLayer();
+    }
+  });
+
+  metricSelect.addEventListener('change', () => {
+    state.heatMetric = metricSelect.value;
+    if (state.heatEnabled) {
+      loadHeatmapData();
+    }
+  });
+
+  // Auto-refresh on map move (debounced)
+  const debouncedLoad = debounce(() => {
+    if (state.heatEnabled && state.mainMap) {
+      loadHeatmapData();
+    }
+  }, 800);
+
+  // Attach map moveend listener once mainMap exists
+  const waitForMap = setInterval(() => {
+    if (state.mainMap) {
+      clearInterval(waitForMap);
+      state.mainMap.on('moveend', debouncedLoad);
+    }
+  }, 200);
+}
+
+async function loadHeatmapData() {
+  if (!state.mainMap) return;
+
+  const center = state.mainMap.getCenter();
+  const bounds = state.mainMap.getBounds();
+  // Approximate radius in miles from map bounds
+  const ne = bounds.getNorthEast();
+  const sw = bounds.getSouthWest();
+  const latDiff = Math.abs(ne.lat - sw.lat);
+  const radiusMiles = Math.max(1, Math.min(15, Math.round(latDiff * 69 / 2)));
+
+  const statsEl = $('heatmap-stats');
+  statsEl.textContent = 'Loading...';
+
+  try {
+    const res = await fetch(
+      `/api/heatmap?lat=${center.lat.toFixed(4)}&lon=${center.lng.toFixed(4)}&radius=${radiusMiles}&metric=${state.heatMetric}`
+    );
+    const data = await res.json();
+
+    if (data.points && data.points.length > 0) {
+      renderHeatLayer(data.points);
+      updateHeatLegend(data.stats, data.metric, data.demo);
+    } else {
+      removeHeatLayer();
+      statsEl.textContent = 'No data for this area';
+    }
+  } catch (err) {
+    // Fallback to demo data
+    const demoData = getDemoHeatmapClient(center.lat, center.lng);
+    renderHeatLayer(demoData.points);
+    updateHeatLegend(demoData.stats, state.heatMetric, true);
+  }
+}
+
+function renderHeatLayer(points) {
+  removeHeatLayer();
+  if (!state.mainMap || !points.length) return;
+
+  state.heatLayer = L.heatLayer(points, {
+    radius: 30,
+    blur: 20,
+    maxZoom: 15,
+    minOpacity: 0.3,
+    gradient: {
+      0.0: '#3b82f6',
+      0.3: '#34d399',
+      0.6: '#fbbf24',
+      1.0: '#f87171',
+    },
+  }).addTo(state.mainMap);
+}
+
+function removeHeatLayer() {
+  if (state.heatLayer && state.mainMap) {
+    state.mainMap.removeLayer(state.heatLayer);
+    state.heatLayer = null;
+  }
+  const statsEl = $('heatmap-stats');
+  if (statsEl) statsEl.textContent = '';
+}
+
+function updateHeatLegend(stats, metric, isDemo) {
+  const statsEl = $('heatmap-stats');
+  if (!stats) {
+    statsEl.textContent = '';
+    return;
+  }
+
+  const metricLabels = {
+    'home-value': { label: 'Median Home Value', fmt: fmtCurrency },
+    'affordability': { label: 'Income/Price Ratio', fmt: (v) => v.toFixed(3) },
+    'momentum': { label: 'Momentum Score', fmt: (v) => Math.round(v) + '/100' },
+    'density': { label: 'Population', fmt: fmt },
+  };
+
+  const m = metricLabels[metric] || metricLabels['home-value'];
+  const demoTag = isDemo ? ' (demo)' : '';
+  statsEl.innerHTML = `
+    <span class="heatmap-stat-label">${m.label}${demoTag}</span>
+    <span class="heatmap-stat-range">${m.fmt(stats.min)} — ${m.fmt(stats.max)}</span>
+  `;
+}
+
+/** Client-side demo heatmap fallback. */
+function getDemoHeatmapClient(lat, lon) {
+  const points = [];
+  for (let i = 0; i < 30; i++) {
+    const angle = (i / 30) * Math.PI * 2;
+    const dist = 0.005 + Math.random() * 0.02;
+    const pLat = lat + Math.cos(angle) * dist + (Math.random() - 0.5) * 0.008;
+    const pLon = lon + Math.sin(angle) * dist + (Math.random() - 0.5) * 0.008;
+    points.push([pLat, pLon, +(0.15 + Math.random() * 0.85).toFixed(3)]);
+  }
+  return { points, stats: { min: 0.15, max: 1.0, avg: 0.55 } };
+}
+
+// ---------------------------------------------------------------------------
 // ANALYTICS TAB
 // ---------------------------------------------------------------------------
 function initAnalytics() {
@@ -1303,7 +1443,7 @@ function renderMomentumScore(data) {
   const trend = data.trend || 'stable';
 
   // Animate gauge
-  const maxDash = 251.3; // arc circumference
+  const maxDash = 251.3;
   const dashLen = (score / 100) * maxDash;
   const gaugeFill = $('gauge-fill');
   gaugeFill.style.transition = 'none';
@@ -1315,7 +1455,6 @@ function renderMomentumScore(data) {
 
   $('gauge-score').textContent = score;
 
-  // Color the score based on value
   let scoreColor = 'var(--yellow)';
   if (score >= 65) scoreColor = 'var(--green)';
   else if (score <= 35) scoreColor = 'var(--red)';
@@ -1338,7 +1477,83 @@ function renderMomentumScore(data) {
     trendLabel.textContent = 'Stable';
   }
 
-  // Factor cards
+  // === Trend Drivers — the agent-ready "why" ===
+  const driversEl = $('momentum-drivers');
+  if (data.drivers?.length) {
+    const driverItems = data.drivers.map(d => {
+      const icon = d.direction === 'up' ? '\u2191' : '\u2193';
+      const cls = d.direction === 'up' ? 'driver-up' : 'driver-down';
+      return `<span class="driver-chip ${cls}">${icon} ${d.name}</span>`;
+    }).join('');
+    driversEl.innerHTML = `
+      <div class="drivers-label">Driven by:</div>
+      <div class="drivers-chips">${driverItems}</div>
+    `;
+    driversEl.classList.remove('hidden');
+  } else {
+    driversEl.classList.add('hidden');
+  }
+
+  // === ZHVI Price History ===
+  const zhviEl = $('momentum-zhvi');
+  if (data.zhvi?.currentValue) {
+    const z = data.zhvi;
+    const fmtK = (v) => v ? `$${Math.round(v / 1000)}K` : '--';
+    const fmtPct = (v) => v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(1)}%` : '--';
+    const yoyClass = z.yoyChange >= 0 ? 'zhvi-up' : 'zhvi-down';
+
+    zhviEl.innerHTML = `
+      <div class="zhvi-header">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        Zillow Home Value Index
+      </div>
+      <div class="zhvi-grid">
+        <div class="zhvi-stat">
+          <span class="zhvi-value">${fmtK(z.currentValue)}</span>
+          <span class="zhvi-label">Current</span>
+        </div>
+        <div class="zhvi-stat">
+          <span class="zhvi-value ${yoyClass}">${fmtPct(z.yoyChange)}</span>
+          <span class="zhvi-label">1-Year Change</span>
+        </div>
+        <div class="zhvi-stat">
+          <span class="zhvi-value">${fmtK(z.value1YrAgo)}</span>
+          <span class="zhvi-label">1 Year Ago</span>
+        </div>
+        <div class="zhvi-stat">
+          <span class="zhvi-value">${fmtK(z.value3YrAgo)}</span>
+          <span class="zhvi-label">3 Years Ago</span>
+        </div>
+        ${z.value5YrAgo ? `
+        <div class="zhvi-stat">
+          <span class="zhvi-value">${fmtK(z.value5YrAgo)}</span>
+          <span class="zhvi-label">5 Years Ago</span>
+        </div>` : ''}
+      </div>
+    `;
+    zhviEl.classList.remove('hidden');
+  } else {
+    zhviEl.classList.add('hidden');
+  }
+
+  // === Prior Snapshot Comparison ===
+  const priorEl = $('momentum-prior');
+  if (data.priorSnapshot) {
+    const diff = score - data.priorSnapshot.score;
+    const diffStr = diff >= 0 ? `+${diff}` : `${diff}`;
+    const diffClass = diff > 0 ? 'prior-up' : diff < 0 ? 'prior-down' : 'prior-same';
+    const date = new Date(data.priorSnapshot.date).toLocaleDateString();
+    priorEl.innerHTML = `
+      <span class="prior-label">vs last check (${date}):</span>
+      <span class="prior-diff ${diffClass}">${diffStr} points</span>
+      <span class="prior-was">(was ${data.priorSnapshot.score}/100)</span>
+    `;
+    priorEl.classList.remove('hidden');
+  } else {
+    priorEl.classList.add('hidden');
+  }
+
+  // === Factor cards with trend indicators ===
   const grid = $('factors-grid');
   grid.innerHTML = '';
   (data.factors || []).forEach(factor => {
@@ -1347,11 +1562,15 @@ function renderMomentumScore(data) {
     if (factor.score >= 65) barColor = 'var(--green)';
     else if (factor.score < 40) barColor = 'var(--red)';
 
+    let trendIcon = '';
+    if (factor.trend === 'up') trendIcon = '<span class="factor-trend factor-trend-up">\u2191</span>';
+    else if (factor.trend === 'down') trendIcon = '<span class="factor-trend factor-trend-down">\u2193</span>';
+
     const card = document.createElement('div');
     card.className = 'factor-card';
     card.innerHTML = `
       <div class="factor-header">
-        <span class="factor-name">${factor.name}</span>
+        <span class="factor-name">${factor.name} ${trendIcon}</span>
         <span class="factor-score ${scoreClass}">${factor.score}</span>
       </div>
       <div class="factor-bar">
@@ -1363,17 +1582,21 @@ function renderMomentumScore(data) {
     grid.appendChild(card);
   });
 
-  // Meta info
+  // === Data sources ===
   const meta = $('momentum-meta');
-  const sources = [];
+  const sources = data.dataSources || [];
   if (data.rawData?.census) sources.push('Census ACS');
+  if (data.rawData?.censusTrends) sources.push('Census Y-o-Y');
   if (data.rawData?.walkScore) sources.push('Walk Score');
-  if (data.rawData?.crime) sources.push('FBI Crime Data');
+  if (data.rawData?.crime) sources.push('FBI Crime');
+  if (data.rawData?.schools) sources.push('GreatSchools');
   if (data.demo) sources.push('Demo Data');
+  const uniqueSources = [...new Set(sources)];
+
   meta.innerHTML = `
-    <strong>Data sources:</strong> ${sources.join(', ') || 'None'}<br>
-    ${data.errors?.length ? `<strong>Warnings:</strong> ${data.errors.join('; ')}` : ''}
-    <br><em>Scores are relative — compare zip codes against each other for best results.</em>
+    <strong>Data sources:</strong> ${uniqueSources.join(' &middot; ') || 'None'}
+    ${data.errors?.length ? `<br><strong>Warnings:</strong> ${data.errors.join('; ')}` : ''}
+    <br><em>Trend arrows indicate real year-over-year directional data, not score-based estimates.</em>
   `;
 }
 
