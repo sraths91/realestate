@@ -487,6 +487,28 @@
     <div id="saved-empty" class="saved-empty-state">
       <p>No saved properties yet. Click the heart icon on any property to save it.</p>
     </div>
+    <!-- Client CRM Section -->
+    <div style="padding:0 16px 16px;border-top:1px solid var(--border);margin-top:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0 8px">
+        <h3 style="font-size:0.95rem;font-weight:700">Clients</h3>
+        <button id="add-client-btn" class="btn btn-secondary btn-sm">+ Add</button>
+      </div>
+      <div id="client-form" class="hidden" style="margin-bottom:12px;padding:12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm)">
+        <input type="text" id="client-name-input" placeholder="Name" style="margin-bottom:6px">
+        <input type="text" id="client-email-input" placeholder="Email" style="margin-bottom:6px">
+        <input type="text" id="client-phone-input" placeholder="Phone" style="margin-bottom:6px">
+        <select id="client-type-input" style="margin-bottom:8px">
+          <option value="buyer">Buyer</option>
+          <option value="seller">Seller</option>
+          <option value="investor">Investor</option>
+        </select>
+        <div style="display:flex;gap:6px">
+          <button id="client-save-btn" class="btn btn-primary btn-sm" style="flex:1">Save</button>
+          <button id="client-cancel-btn" class="btn btn-secondary btn-sm">Cancel</button>
+        </div>
+      </div>
+      <div id="client-list"></div>
+    </div>
   </div>
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
 

@@ -152,7 +152,34 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT DEFAULT (datetime('now', '+30 days'))
   );
+
+  CREATE TABLE IF NOT EXISTS clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT,
+    phone TEXT,
+    client_type TEXT DEFAULT 'buyer',
+    notes TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS client_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    portfolio_id TEXT,
+    data_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_client_activity ON client_activity(client_id, created_at);
 `);
+
+// Extend portfolios table for client tracking (safe ALTER, ignore if already exists)
+try { db.exec('ALTER TABLE portfolios ADD COLUMN client_id INTEGER'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE portfolios ADD COLUMN view_count INTEGER DEFAULT 0'); } catch { /* already exists */ }
+try { db.exec('ALTER TABLE portfolios ADD COLUMN last_viewed_at TEXT'); } catch { /* already exists */ }
 
 // Cleanup old listing snapshots (keep 180 days)
 try {
@@ -1972,12 +1999,14 @@ app.get('/api/health', (req, res) => {
   try { alertCount = db.prepare('SELECT COUNT(*) as c FROM alerts WHERE read = 0').get().c; } catch (e) {}
   let reportCount = 0;
   try { reportCount = db.prepare('SELECT COUNT(*) as c FROM reports').get().c; } catch (e) {}
+  let clientCount = 0;
+  try { clientCount = db.prepare('SELECT COUNT(*) as c FROM clients').get().c; } catch (e) {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount, reports: reportCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount, reports: reportCount, clients: clientCount },
     uptime: process.uptime(),
   });
 });
@@ -2367,8 +2396,105 @@ async function runAlertScanner() {
     }
   }
 
+  // 4. Follow-up intelligence — portfolios shared but not viewed after 7 days
+  try {
+    const stalePortfolios = db.prepare(`
+      SELECT p.id, p.client_id, c.name as client_name
+      FROM portfolios p
+      JOIN clients c ON c.id = p.client_id
+      WHERE p.last_viewed_at IS NULL
+      AND p.created_at < datetime('now', '-7 days')
+    `).all();
+    for (const sp of stalePortfolios) {
+      const existing = db.prepare("SELECT id FROM alerts WHERE type = 'follow_up' AND property_address = ? AND created_at > datetime('now', '-7 days')").get(`portfolio-${sp.id}`);
+      if (!existing) {
+        insertAlert.run('follow_up', null, `portfolio-${sp.id}`, JSON.stringify({
+          clientName: sp.client_name, portfolioId: sp.id,
+          message: `Portfolio shared with ${sp.client_name} 7+ days ago — not viewed`,
+        }));
+      }
+    }
+  } catch { /* skip */ }
+
   console.log('[AlertScanner] Scan complete');
 }
+
+// ===========================================================================
+// CLIENTS — lightweight CRM
+// ===========================================================================
+app.get('/api/clients', (req, res) => {
+  try {
+    const clients = db.prepare('SELECT * FROM clients ORDER BY updated_at DESC').all();
+    res.json(clients);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/clients', (req, res) => {
+  try {
+    const { name, email, phone, clientType, notes } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const r = db.prepare('INSERT INTO clients (name, email, phone, client_type, notes) VALUES (?, ?, ?, ?, ?)')
+      .run(name, email || '', phone || '', clientType || 'buyer', notes || '');
+    res.json({ id: r.lastInsertRowid });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/clients/:id', (req, res) => {
+  try {
+    const { name, email, phone, clientType, notes } = req.body;
+    const existing = db.prepare('SELECT id FROM clients WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Client not found' });
+    db.prepare("UPDATE clients SET name = ?, email = ?, phone = ?, client_type = ?, notes = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(name || '', email || '', phone || '', clientType || 'buyer', notes || '', req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/clients/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM clients WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/clients/:id/activity', (req, res) => {
+  try {
+    const activities = db.prepare('SELECT * FROM client_activity WHERE client_id = ? ORDER BY created_at DESC LIMIT 50').all(req.params.id);
+    activities.forEach(a => { try { a.data = JSON.parse(a.data_json || '{}'); } catch { a.data = {}; } });
+    res.json(activities);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Portfolio tracking pixel — 1x1 transparent GIF
+const TRACKING_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+
+app.get('/api/portfolios/:id/track', (req, res) => {
+  try {
+    const portfolio = db.prepare('SELECT id, client_id FROM portfolios WHERE id = ?').get(req.params.id);
+    if (portfolio) {
+      db.prepare("UPDATE portfolios SET view_count = COALESCE(view_count, 0) + 1, last_viewed_at = datetime('now') WHERE id = ?").run(req.params.id);
+      if (portfolio.client_id) {
+        db.prepare('INSERT INTO client_activity (client_id, event_type, portfolio_id, data_json) VALUES (?, ?, ?, ?)')
+          .run(portfolio.client_id, 'portfolio_view', req.params.id, JSON.stringify({ ip: req.ip, ua: req.headers['user-agent'] }));
+      }
+    }
+  } catch { /* tracking should never error */ }
+  res.set({ 'Content-Type': 'image/gif', 'Cache-Control': 'no-store', 'Content-Length': TRACKING_GIF.length });
+  res.end(TRACKING_GIF);
+});
+
+// Link portfolio to client
+app.post('/api/portfolios/:id/link-client', (req, res) => {
+  try {
+    const { clientId } = req.body;
+    db.prepare('UPDATE portfolios SET client_id = ? WHERE id = ?').run(clientId || null, req.params.id);
+    if (clientId) {
+      db.prepare('INSERT INTO client_activity (client_id, event_type, portfolio_id, data_json) VALUES (?, ?, ?, ?)')
+        .run(clientId, 'portfolio_shared', req.params.id, JSON.stringify({ sharedAt: new Date().toISOString() }));
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
 // ===========================================================================
 // RENTAL COMPS — nearby rental comparables via RentCast

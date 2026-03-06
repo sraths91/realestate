@@ -23,6 +23,7 @@ const state = {
   alerts: [],
   unreadAlertCount: 0,
   savedSearches: [],
+  clients: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSavedSearches();
   initAgentSettings();
   initCompare();
+  initClients();
   checkApiStatus();
 });
 
@@ -2662,4 +2664,99 @@ async function generateComparisonReport() {
   } catch {
     toast('Failed to generate report', 'error');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Client CRM
+// ---------------------------------------------------------------------------
+function initClients() {
+  const addBtn = $('add-client-btn');
+  const form = $('client-form');
+  if (!addBtn || !form) return;
+
+  addBtn.addEventListener('click', () => {
+    form.classList.toggle('hidden');
+    if (!form.classList.contains('hidden')) $('client-name-input')?.focus();
+  });
+  $('client-cancel-btn')?.addEventListener('click', () => {
+    hide(form);
+    clearClientForm();
+  });
+  $('client-save-btn')?.addEventListener('click', saveClient);
+
+  loadClients();
+}
+
+function clearClientForm() {
+  if ($('client-name-input')) $('client-name-input').value = '';
+  if ($('client-email-input')) $('client-email-input').value = '';
+  if ($('client-phone-input')) $('client-phone-input').value = '';
+  if ($('client-type-input')) $('client-type-input').value = 'buyer';
+}
+
+async function loadClients() {
+  try {
+    const res = await fetch('/api/clients');
+    if (!res.ok) return;
+    state.clients = await res.json();
+    renderClients();
+  } catch { /* offline */ }
+}
+
+async function saveClient() {
+  const name = $('client-name-input')?.value.trim();
+  if (!name) { toast('Enter a client name', 'error'); return; }
+
+  try {
+    const res = await fetch('/api/clients', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name,
+        email: $('client-email-input')?.value.trim() || '',
+        phone: $('client-phone-input')?.value.trim() || '',
+        clientType: $('client-type-input')?.value || 'buyer',
+      }),
+    });
+    if (!res.ok) { toast('Failed to add client', 'error'); return; }
+    toast('Client added', 'success');
+    hide($('client-form'));
+    clearClientForm();
+    loadClients();
+  } catch { toast('Failed to add client', 'error'); }
+}
+
+function renderClients() {
+  const list = $('client-list');
+  if (!list) return;
+
+  if (!state.clients.length) {
+    list.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-dim);font-size:0.8rem">No clients yet</div>';
+    return;
+  }
+
+  list.innerHTML = state.clients.map(c => {
+    const initials = c.name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2);
+    return `<div class="client-card" data-id="${c.id}">
+      <div class="client-avatar ${c.client_type}">${initials}</div>
+      <div class="client-info">
+        <div class="client-name">${c.name}</div>
+        <div class="client-meta">${c.email || c.phone || 'No contact info'}</div>
+      </div>
+      <span class="client-type-badge ${c.client_type}">${c.client_type}</span>
+      <div class="client-actions">
+        <button class="client-delete" title="Delete" onclick="deleteClient(${c.id})">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function deleteClient(id) {
+  try {
+    const res = await fetch(`/api/clients/${id}`, { method: 'DELETE' });
+    if (!res.ok) { toast('Failed to delete client', 'error'); return; }
+    state.clients = state.clients.filter(c => c.id !== id);
+    renderClients();
+    toast('Client removed', 'success');
+  } catch { toast('Failed to delete client', 'error'); }
 }
