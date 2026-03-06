@@ -1681,7 +1681,7 @@ async function censusTractFetch(stateFips, countyFips) {
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E';
+  const vars = 'B19013_001E,B25077_001E,B01003_001E,B25002_003E,B25002_001E,B25064_001E';
   const url = `https://api.census.gov/data/2022/acs/acs5?get=${vars}&for=tract:*&in=state:${stateFips}&in=county:${countyFips}`;
   const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
   if (!r.ok) throw new Error(`Census Tract API ${r.status}`);
@@ -1696,9 +1696,10 @@ async function censusTractFetch(stateFips, countyFips) {
     population: parseInt(row[2]) || null,
     vacantUnits: parseInt(row[3]) || null,
     totalUnits: parseInt(row[4]) || null,
-    state: row[5],
-    county: row[6],
-    tract: row[7],
+    medianRent: parseInt(row[5]) || null,
+    state: row[6],
+    county: row[7],
+    tract: row[8],
   }));
 
   cacheSet(cacheKey, tracts);
@@ -1842,6 +1843,11 @@ app.get('/api/heatmap', async (req, res) => {
           break;
         case 'density':
           rawValue = tractData.population;
+          break;
+        case 'rental-yield':
+          if (tractData.medianRent && tractData.medianHomeValue && tractData.medianHomeValue > 0) {
+            rawValue = (tractData.medianRent * 12) / tractData.medianHomeValue * 100;
+          }
           break;
         default:
           rawValue = tractData.medianHomeValue;
@@ -2363,6 +2369,142 @@ async function runAlertScanner() {
 
   console.log('[AlertScanner] Scan complete');
 }
+
+// ===========================================================================
+// RENTAL COMPS — nearby rental comparables via RentCast
+// ===========================================================================
+app.get('/api/rental-comps', async (req, res) => {
+  try {
+    const { address, lat, lon, zipCode, bedrooms } = req.query;
+    if (!address && !zipCode) return res.status(400).json({ error: 'Provide address or zipCode' });
+
+    const cacheKey = `rental-comps:${address || zipCode}:${bedrooms || 'any'}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ ...cached, cached: true });
+
+    if (RENTCAST_KEY) {
+      const params = new URLSearchParams();
+      if (address) params.set('address', address);
+      else if (zipCode) params.set('zipCode', zipCode);
+      if (bedrooms) params.set('bedrooms', bedrooms);
+      params.set('limit', '10');
+
+      const r = await fetch(`${RENTCAST_BASE}/rentals?${params}`, {
+        headers: { 'X-Api-Key': RENTCAST_KEY, Accept: 'application/json' },
+      });
+      if (r.ok) {
+        const data = await r.json();
+        const result = {
+          rentals: (data || []).map(c => ({
+            address: c.formattedAddress || c.addressLine1 || '',
+            rent: c.price || c.lastSeenPrice || null,
+            bedrooms: c.bedrooms, bathrooms: c.bathrooms,
+            sqft: c.squareFootage, distance: c.distance,
+            propertyType: c.propertyType,
+          })),
+          source: 'rentcast',
+        };
+        cacheSet(cacheKey, result);
+        return res.json(result);
+      }
+    }
+
+    // Demo fallback
+    const demoRentals = Array.from({ length: 5 }, (_, i) => ({
+      address: `${100 + i * 100} Rental Ave, ${zipCode || 'Unknown'}`,
+      rent: 1200 + Math.floor(Math.random() * 800),
+      bedrooms: (bedrooms ? parseInt(bedrooms) : 3),
+      bathrooms: 2,
+      sqft: 900 + Math.floor(Math.random() * 600),
+      distance: +(0.3 + i * 0.4).toFixed(1),
+      propertyType: 'Apartment',
+    }));
+    res.json({ rentals: demoRentals, source: 'demo' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===========================================================================
+// INVESTMENT SCENARIOS — 3-scenario (conservative/moderate/aggressive)
+// ===========================================================================
+app.post('/api/investment/scenarios', (req, res) => {
+  try {
+    const { purchasePrice, monthlyRent, downPaymentPct, interestRate, loanTermYears } = req.body;
+    if (!purchasePrice || !monthlyRent) return res.status(400).json({ error: 'purchasePrice and monthlyRent required' });
+
+    const price = Number(purchasePrice);
+    const rent = Number(monthlyRent);
+    const dpPct = Number(downPaymentPct || 20) / 100;
+    const rate = Number(interestRate || 6.5) / 100 / 12;
+    const term = Number(loanTermYears || 30) * 12;
+    const downPayment = price * dpPct;
+    const loanAmt = price - downPayment;
+    const monthlyMortgage = rate > 0 ? loanAmt * rate * Math.pow(1 + rate, term) / (Math.pow(1 + rate, term) - 1) : loanAmt / term;
+
+    const scenarios = [
+      { name: 'Conservative', vacancy: 0.12, expenses: 0.45, appreciation: 0.02, rentGrowth: 0.015 },
+      { name: 'Moderate', vacancy: 0.08, expenses: 0.38, appreciation: 0.035, rentGrowth: 0.025 },
+      { name: 'Aggressive', vacancy: 0.05, expenses: 0.30, appreciation: 0.05, rentGrowth: 0.04 },
+    ];
+
+    const results = scenarios.map(s => {
+      const projections = [];
+      let currentRent = rent;
+      let currentValue = price;
+      let totalEquity = downPayment;
+      let principalPaid = 0;
+      let balance = loanAmt;
+
+      for (let year = 1; year <= 5; year++) {
+        currentRent *= (1 + s.rentGrowth);
+        currentValue *= (1 + s.appreciation);
+        const annualRent = currentRent * 12 * (1 - s.vacancy);
+        const annualExpenses = annualRent * s.expenses;
+        const annualMortgage = monthlyMortgage * 12;
+
+        // Principal paid this year (approximate)
+        const yearlyInterest = balance * (Number(interestRate || 6.5) / 100);
+        const yearlyPrincipal = annualMortgage - yearlyInterest;
+        balance -= yearlyPrincipal;
+        principalPaid += yearlyPrincipal;
+
+        const cashFlow = annualRent - annualExpenses - annualMortgage;
+        totalEquity = (currentValue - balance);
+
+        projections.push({
+          year,
+          monthlyRent: Math.round(currentRent),
+          annualCashFlow: Math.round(cashFlow),
+          propertyValue: Math.round(currentValue),
+          equity: Math.round(totalEquity),
+          totalReturn: Math.round(totalEquity - downPayment + cashFlow * year),
+        });
+      }
+
+      // Break-even rent
+      const annualExpenseRate = s.expenses;
+      const annualMortgage = monthlyMortgage * 12;
+      const breakEvenRent = Math.ceil(annualMortgage / (12 * (1 - s.vacancy) * (1 - annualExpenseRate)));
+
+      return {
+        scenario: s.name,
+        assumptions: { vacancy: s.vacancy, expenses: s.expenses, appreciation: s.appreciation, rentGrowth: s.rentGrowth },
+        projections,
+        breakEvenRent,
+        year1CashFlow: projections[0]?.annualCashFlow || 0,
+        year5TotalReturn: projections[4]?.totalReturn || 0,
+      };
+    });
+
+    res.json({
+      purchasePrice: price, monthlyRent: rent, downPayment, monthlyMortgage: Math.round(monthlyMortgage),
+      scenarios: results,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ===========================================================================
 // AGENT PROFILE — branding for reports

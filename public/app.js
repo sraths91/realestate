@@ -1865,7 +1865,31 @@ function renderSavedDrawer() {
   }
   hide(empty);
 
+  // Portfolio summary card
   list.innerHTML = '';
+  if (state.savedProperties.length >= 2) {
+    const totalValue = state.savedProperties.reduce((s, p) => s + (p.currentPrice || p.savedPrice || 0), 0);
+    const totalRent = state.savedProperties.reduce((s, p) => s + (p.property?.rentEstimate || p.rentEstimate || 0), 0);
+    const avgCap = totalRent && totalValue ? ((totalRent * 12) / totalValue * 100) : 0;
+    const zips = [...new Set(state.savedProperties.map(p => p.zip).filter(Boolean))];
+
+    const summary = document.createElement('div');
+    summary.className = 'saved-property';
+    summary.style.borderColor = 'var(--accent)';
+    summary.style.background = 'rgba(91,141,249,0.04)';
+    summary.innerHTML = `
+      <div style="font-weight:700;font-size:0.9rem;margin-bottom:8px;color:var(--accent)">Portfolio Summary</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.8rem">
+        <div><span style="color:var(--text-muted)">Properties:</span> <strong>${state.savedProperties.length}</strong></div>
+        <div><span style="color:var(--text-muted)">Total Value:</span> <strong>${fmtCurrency(totalValue)}</strong></div>
+        ${totalRent ? `<div><span style="color:var(--text-muted)">Monthly Rent:</span> <strong>${fmtCurrency(totalRent)}</strong></div>` : ''}
+        ${avgCap ? `<div><span style="color:var(--text-muted)">Avg Cap Rate:</span> <strong>${avgCap.toFixed(1)}%</strong></div>` : ''}
+        <div style="grid-column:span 2"><span style="color:var(--text-muted)">Zip Codes:</span> ${zips.join(', ') || 'N/A'}</div>
+      </div>
+    `;
+    list.appendChild(summary);
+  }
+
   state.savedProperties.forEach((saved, i) => {
     const el = document.createElement('div');
     el.className = 'saved-property';
@@ -2127,6 +2151,98 @@ function initCalculator() {
   ['calc-price', 'calc-rent', 'calc-down', 'calc-rate', 'calc-term', 'calc-expenses'].forEach(id => {
     $(id).addEventListener('input', calculateInvestment);
   });
+
+  // Scenario tabs
+  const scenarioTabs = $('scenario-tabs');
+  if (scenarioTabs) {
+    scenarioTabs.querySelectorAll('.btn-toggle').forEach(btn => {
+      btn.addEventListener('click', () => {
+        scenarioTabs.querySelectorAll('.btn-toggle').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderActiveScenario();
+      });
+    });
+  }
+
+  // Run scenarios button
+  $('calc-run-scenarios')?.addEventListener('click', runScenarios);
+}
+
+let scenarioData = null;
+
+async function runScenarios() {
+  const price = parseFloat($('calc-price')?.value) || 0;
+  const rent = parseFloat($('calc-rent')?.value) || 0;
+  if (!price || !rent) {
+    toast('Set purchase price and rent first', 'error');
+    return;
+  }
+
+  const btn = $('calc-run-scenarios');
+  btn.disabled = true;
+  btn.textContent = 'Calculating...';
+
+  try {
+    const res = await fetch('/api/investment/scenarios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        purchasePrice: price,
+        monthlyRent: rent,
+        downPaymentPct: parseFloat($('calc-down')?.value) || 20,
+        interestRate: parseFloat($('calc-rate')?.value) || 6.5,
+        loanTermYears: parseFloat($('calc-term')?.value) || 30,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed');
+    scenarioData = await res.json();
+    renderActiveScenario();
+  } catch {
+    toast('Failed to run scenarios', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run Scenarios';
+  }
+}
+
+function renderActiveScenario() {
+  if (!scenarioData) return;
+  const container = $('scenario-projection');
+  if (!container) return;
+
+  const activeTab = document.querySelector('#scenario-tabs .btn-toggle.active')?.dataset.scenario || 'moderate';
+  const nameMap = { conservative: 'Conservative', moderate: 'Moderate', aggressive: 'Aggressive' };
+  const scenario = scenarioData.scenarios.find(s => s.scenario === nameMap[activeTab]);
+  if (!scenario) return;
+
+  let html = `<div style="margin-bottom:8px;text-align:left">
+    <span style="font-size:0.75rem;color:var(--text-dim)">Assumptions: ${(scenario.assumptions.vacancy*100).toFixed(0)}% vacancy, ${(scenario.assumptions.expenses*100).toFixed(0)}% expenses, ${(scenario.assumptions.appreciation*100).toFixed(1)}% appreciation, ${(scenario.assumptions.rentGrowth*100).toFixed(1)}% rent growth</span>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.8rem;text-align:right">
+    <thead><tr style="border-bottom:2px solid var(--border)">
+      <th style="text-align:left;padding:4px 8px">Year</th>
+      <th style="padding:4px 8px">Rent/mo</th>
+      <th style="padding:4px 8px">Cash Flow</th>
+      <th style="padding:4px 8px">Value</th>
+      <th style="padding:4px 8px">Equity</th>
+    </tr></thead><tbody>`;
+
+  for (const p of scenario.projections) {
+    const cfColor = p.annualCashFlow >= 0 ? 'var(--green)' : 'var(--red)';
+    html += `<tr style="border-bottom:1px solid var(--border)">
+      <td style="text-align:left;padding:4px 8px">${p.year}</td>
+      <td style="padding:4px 8px">${fmtCurrency(p.monthlyRent)}</td>
+      <td style="padding:4px 8px;color:${cfColor}">${fmtCurrency(p.annualCashFlow)}</td>
+      <td style="padding:4px 8px">${fmtCurrency(p.propertyValue)}</td>
+      <td style="padding:4px 8px">${fmtCurrency(p.equity)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  html += `<div style="margin-top:8px;text-align:left;font-size:0.8rem">
+    <span style="color:var(--yellow);font-weight:600">Break-even rent: ${fmtCurrency(scenario.breakEvenRent)}/mo</span>
+  </div>`;
+
+  container.innerHTML = html;
 }
 
 // ---------------------------------------------------------------------------
