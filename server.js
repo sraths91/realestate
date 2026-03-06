@@ -13,6 +13,8 @@ const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
 const WALKSCORE_KEY = process.env.WALKSCORE_API_KEY;
 const RENTCAST_BASE = 'https://api.rentcast.io/v1';
 const GREATSCHOOLS_KEY = process.env.GREATSCHOOLS_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 app.use(cors());
 app.use(express.json());
@@ -130,6 +132,26 @@ db.exec(`
     FOREIGN KEY (search_id) REFERENCES saved_searches(id) ON DELETE SET NULL
   );
   CREATE INDEX IF NOT EXISTS idx_alerts_read ON alerts(read, created_at);
+
+  CREATE TABLE IF NOT EXISTS agent_profiles (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    name TEXT,
+    email TEXT,
+    phone TEXT,
+    logo_url TEXT,
+    brand_color TEXT DEFAULT '#5b8df9',
+    tagline TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS reports (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    data_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT DEFAULT (datetime('now', '+30 days'))
+  );
 `);
 
 // Cleanup old listing snapshots (keep 180 days)
@@ -140,6 +162,10 @@ try {
 try {
   const alertsDel = db.prepare("DELETE FROM alerts WHERE created_at < datetime('now', '-90 days')").run();
   if (alertsDel.changes > 0) console.log(`Cleaned up ${alertsDel.changes} old alerts`);
+} catch (e) { /* ignore on first run */ }
+try {
+  const reportsDel = db.prepare("DELETE FROM reports WHERE expires_at < datetime('now')").run();
+  if (reportsDel.changes > 0) console.log(`Cleaned up ${reportsDel.changes} expired reports`);
 } catch (e) { /* ignore on first run */ }
 console.log('SQLite database initialized at', path.join(DATA_DIR, 'propscout.db'));
 
@@ -1938,12 +1964,14 @@ app.get('/api/health', (req, res) => {
   try { portfolioCount = db.prepare('SELECT COUNT(*) as c FROM portfolios').get().c; } catch (e) {}
   try { searchCount = db.prepare('SELECT COUNT(*) as c FROM saved_searches').get().c; } catch (e) {}
   try { alertCount = db.prepare('SELECT COUNT(*) as c FROM alerts WHERE read = 0').get().c; } catch (e) {}
+  let reportCount = 0;
+  try { reportCount = db.prepare('SELECT COUNT(*) as c FROM reports').get().c; } catch (e) {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount, reports: reportCount },
     uptime: process.uptime(),
   });
 });
@@ -2336,6 +2364,235 @@ async function runAlertScanner() {
   console.log('[AlertScanner] Scan complete');
 }
 
+// ===========================================================================
+// AGENT PROFILE — branding for reports
+// ===========================================================================
+app.get('/api/agent/profile', (req, res) => {
+  try {
+    const profile = db.prepare('SELECT * FROM agent_profiles WHERE id = 1').get();
+    res.json(profile || { id: 1, name: '', email: '', phone: '', logo_url: '', brand_color: '#5b8df9', tagline: '' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/agent/profile', (req, res) => {
+  try {
+    const { name, email, phone, logoUrl, brandColor, tagline } = req.body;
+    const existing = db.prepare('SELECT id FROM agent_profiles WHERE id = 1').get();
+    if (existing) {
+      db.prepare(`UPDATE agent_profiles SET name = ?, email = ?, phone = ?, logo_url = ?, brand_color = ?, tagline = ?, updated_at = datetime('now') WHERE id = 1`)
+        .run(name || '', email || '', phone || '', logoUrl || '', brandColor || '#5b8df9', tagline || '');
+    } else {
+      db.prepare(`INSERT INTO agent_profiles (id, name, email, phone, logo_url, brand_color, tagline) VALUES (1, ?, ?, ?, ?, ?, ?)`)
+        .run(name || '', email || '', phone || '', logoUrl || '', brandColor || '#5b8df9', tagline || '');
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===========================================================================
+// AI NARRATIVE — Claude → OpenAI → template fallback
+// ===========================================================================
+async function generateNarrative(propertyData, marketData, momentumData) {
+  const prompt = `You are a real estate analyst writing a brief property report summary. Be concise (3-4 sentences).
+
+Property: ${propertyData.address || 'Unknown'}
+Type: ${propertyData.propertyType || 'Residential'}, ${propertyData.bedrooms || '?'}bd/${propertyData.bathrooms || '?'}ba, ${propertyData.squareFootage || '?'} sqft
+Estimated Value: $${propertyData.estimatedValue ? Number(propertyData.estimatedValue).toLocaleString() : 'N/A'}
+${propertyData.rentEstimate ? `Rent Estimate: $${Number(propertyData.rentEstimate).toLocaleString()}/mo` : ''}
+${momentumData ? `Momentum Score: ${momentumData.score}/100 (${momentumData.trend || 'stable'})` : ''}
+${marketData ? `Market Context: Median home value $${marketData.medianValue ? Number(marketData.medianValue).toLocaleString() : 'N/A'}, ${marketData.daysOnMarket || '?'} avg days on market` : ''}
+
+Write a professional summary highlighting investment potential, market position, and key factors.`;
+
+  // Try Claude API first
+  if (ANTHROPIC_API_KEY) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 500,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { source: 'claude', text: data.content?.[0]?.text || '' };
+      }
+    } catch (err) { console.log('[AI] Claude API error:', err.message); }
+  }
+
+  // Try OpenAI fallback
+  if (OPENAI_API_KEY) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          max_tokens: 500,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return { source: 'openai', text: data.choices?.[0]?.message?.content || '' };
+      }
+    } catch (err) { console.log('[AI] OpenAI API error:', err.message); }
+  }
+
+  // Template fallback
+  return { source: 'template', text: templateNarrative(propertyData, marketData, momentumData) };
+}
+
+function templateNarrative(prop, market, momentum) {
+  const parts = [];
+  if (prop.address) parts.push(`This property at ${prop.address} is a ${prop.propertyType || 'residential'} home with ${prop.bedrooms || '?'} bedrooms and ${prop.bathrooms || '?'} bathrooms.`);
+  if (prop.estimatedValue) {
+    const val = Number(prop.estimatedValue).toLocaleString();
+    parts.push(`The estimated market value is $${val}${prop.rentEstimate ? `, with a potential rental income of $${Number(prop.rentEstimate).toLocaleString()}/month` : ''}.`);
+  }
+  if (momentum && momentum.score != null) {
+    const trend = momentum.score >= 65 ? 'strong upward momentum' : momentum.score >= 45 ? 'stable market conditions' : 'softening market conditions';
+    parts.push(`The area shows ${trend} with a momentum score of ${momentum.score}/100.`);
+  }
+  if (market && market.medianValue) {
+    parts.push(`The local market has a median home value of $${Number(market.medianValue).toLocaleString()}.`);
+  }
+  return parts.join(' ') || 'No data available for narrative generation.';
+}
+
+app.post('/api/ai/narrative', async (req, res) => {
+  try {
+    const { propertyData, marketData, momentumData } = req.body;
+    if (!propertyData) return res.status(400).json({ error: 'propertyData required' });
+    const narrative = await generateNarrative(propertyData, marketData, momentumData);
+    res.json(narrative);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===========================================================================
+// REPORTS — generate report data bundles
+// ===========================================================================
+app.post('/api/reports/property/:savedId', async (req, res) => {
+  try {
+    const saved = db.prepare('SELECT * FROM saved_properties WHERE id = ?').get(req.params.savedId);
+    if (!saved) return res.status(404).json({ error: 'Saved property not found' });
+
+    // Gather all available data
+    const address = saved.address;
+    const zip = saved.zip || '';
+    let propertyDetails = null;
+    let valuation = null;
+    let momentumData = null;
+    let marketContext = null;
+
+    // Try to look up fresh property data
+    try { propertyDetails = await lookupProperty(address); } catch { /* use saved data */ }
+    try {
+      if (zip) {
+        const snap = db.prepare('SELECT * FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1').get(zip);
+        if (snap) momentumData = { score: snap.score, trend: snap.trend, factors: JSON.parse(snap.factors_json || '{}') };
+      }
+    } catch { /* skip */ }
+    try {
+      if (zip) {
+        const mc = db.prepare('SELECT * FROM market_context_cache WHERE zip = ?').get(zip);
+        if (mc) marketContext = JSON.parse(mc.data_json || '{}');
+      }
+    } catch { /* skip */ }
+
+    // Combine saved info with fresh data
+    const propertyData = {
+      address,
+      propertyType: saved.property_type || propertyDetails?.propertyType || '',
+      bedrooms: propertyDetails?.bedrooms || saved.bedrooms || '',
+      bathrooms: propertyDetails?.bathrooms || saved.bathrooms || '',
+      squareFootage: propertyDetails?.squareFootage || saved.sqft || '',
+      yearBuilt: propertyDetails?.yearBuilt || '',
+      estimatedValue: saved.current_price || saved.saved_price || '',
+      savedPrice: saved.saved_price || '',
+      currentPrice: saved.current_price || '',
+      rentEstimate: valuation?.rentEstimate || '',
+      lotSize: propertyDetails?.lotSize || '',
+      lastSaleDate: propertyDetails?.lastSaleDate || '',
+      lastSalePrice: propertyDetails?.lastSalePrice || '',
+    };
+
+    // Generate AI narrative
+    const narrative = await generateNarrative(propertyData, marketContext, momentumData);
+
+    // Get agent profile
+    const agentProfile = db.prepare('SELECT * FROM agent_profiles WHERE id = 1').get() || {};
+
+    // Save report
+    const reportId = crypto.randomUUID();
+    const reportData = { propertyData, momentumData, marketContext, narrative, agentProfile, generatedAt: new Date().toISOString() };
+    db.prepare('INSERT INTO reports (id, type, data_json) VALUES (?, ?, ?)').run(reportId, 'property', JSON.stringify(reportData));
+
+    res.json({ reportId, ...reportData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/reports/compare', async (req, res) => {
+  try {
+    const { zipCodes } = req.body;
+    if (!zipCodes || !Array.isArray(zipCodes) || zipCodes.length < 2) {
+      return res.status(400).json({ error: 'Provide at least 2 zip codes' });
+    }
+    if (zipCodes.length > 5) return res.status(400).json({ error: 'Maximum 5 zip codes' });
+
+    const comparisons = [];
+    for (const zip of zipCodes) {
+      const snap = db.prepare('SELECT * FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1').get(zip);
+      const zhvi = db.prepare('SELECT * FROM zhvi_data WHERE zip = ?').get(zip);
+      const mc = db.prepare('SELECT * FROM market_context_cache WHERE zip = ?').get(zip);
+
+      comparisons.push({
+        zip,
+        momentum: snap ? { score: snap.score, trend: snap.trend, factors: JSON.parse(snap.factors_json || '{}') } : null,
+        zhvi: zhvi ? { currentValue: zhvi.current_value, yoyChange: zhvi.yoy_change, fiveYearChange: zhvi.five_year_change } : null,
+        market: mc ? JSON.parse(mc.data_json || '{}') : null,
+      });
+    }
+
+    const agentProfile = db.prepare('SELECT * FROM agent_profiles WHERE id = 1').get() || {};
+    const reportId = crypto.randomUUID();
+    const reportData = { zipCodes, comparisons, agentProfile, generatedAt: new Date().toISOString() };
+    db.prepare('INSERT INTO reports (id, type, data_json) VALUES (?, ?, ?)').run(reportId, 'compare', JSON.stringify(reportData));
+
+    res.json({ reportId, ...reportData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/reports/:id', (req, res) => {
+  try {
+    const report = db.prepare('SELECT * FROM reports WHERE id = ?').get(req.params.id);
+    if (!report) return res.status(404).json({ error: 'Report not found' });
+    res.json({ id: report.id, type: report.type, data: JSON.parse(report.data_json || '{}'), created_at: report.created_at });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -2357,6 +2614,9 @@ app.listen(PORT, () => {
   console.log('  FBI Crime (free): multi-year trend analysis');
   if (WALKSCORE_KEY) console.log('  Walk Score: ACTIVE');
   if (GREATSCHOOLS_KEY) console.log('  GreatSchools: ACTIVE');
+  if (ANTHROPIC_API_KEY) console.log('  AI Narrative (Claude): ACTIVE');
+  else if (OPENAI_API_KEY) console.log('  AI Narrative (OpenAI): ACTIVE');
+  else console.log('  AI Narrative: template fallback (add ANTHROPIC_API_KEY or OPENAI_API_KEY)');
   console.log(`  SQLite: ${path.join(DATA_DIR, 'propscout.db')}`);
   console.log('  Cache: 24-hour TTL\n');
 

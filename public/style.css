@@ -694,6 +694,12 @@ select { cursor: pointer; appearance: none;
   cursor: pointer; font-weight: 600;
 }
 .sp-calc-btn:hover { background: rgba(91,141,249,0.2); }
+.sp-report-btn {
+  font-size: 0.7rem; padding: 3px 10px; border-radius: 12px;
+  background: rgba(52,211,153,0.12); color: var(--green); border: none;
+  cursor: pointer; font-weight: 600;
+}
+.sp-report-btn:hover { background: rgba(52,211,153,0.2); }
 .sp-notes {
   font-size: 0.8rem; color: var(--text-muted); font-style: italic;
   margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);

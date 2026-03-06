@@ -48,6 +48,9 @@
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
           <span class="saved-count" id="saved-count">0</span>
         </button>
+        <button class="btn-alert-toggle" id="agent-settings-btn" title="Agent Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
         <div class="api-status" id="api-status">
         <span class="status-dot"></span>
         <span class="status-text">Checking...</span>
@@ -410,6 +413,7 @@
           <input type="text" id="momentum-zip" placeholder="Enter Zip Code" maxlength="5" />
           <input type="text" id="momentum-state" placeholder="State (e.g. MN)" maxlength="2" />
           <button id="momentum-btn" class="btn btn-primary">Analyze</button>
+          <button id="compare-neighborhoods-btn" class="btn btn-secondary" title="Compare multiple zip codes">Compare</button>
         </div>
       </div>
 
@@ -580,6 +584,60 @@
       </div>
       <div class="calc-actions">
         <button id="calc-print" class="btn btn-secondary btn-sm">Print Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agent Settings Modal -->
+  <div id="agent-modal" class="calc-modal hidden">
+    <div class="calc-content">
+      <div class="calc-header">
+        <h3>Agent Branding</h3>
+        <button id="agent-modal-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="calc-body">
+        <div class="calc-inputs">
+          <div class="calc-input-group">
+            <label>Your Name</label>
+            <input type="text" id="agent-name" placeholder="Jane Smith">
+          </div>
+          <div class="calc-input-group">
+            <label>Email</label>
+            <input type="text" id="agent-email" placeholder="jane@realty.com">
+          </div>
+          <div class="calc-input-group">
+            <label>Phone</label>
+            <input type="text" id="agent-phone" placeholder="(555) 123-4567">
+          </div>
+          <div class="calc-input-group">
+            <label>Brand Color</label>
+            <input type="text" id="agent-brand-color" value="#5b8df9" placeholder="#5b8df9">
+          </div>
+          <div class="calc-input-group" style="grid-column: span 2">
+            <label>Tagline</label>
+            <input type="text" id="agent-tagline" placeholder="Your trusted real estate advisor">
+          </div>
+        </div>
+      </div>
+      <div class="calc-actions">
+        <button id="agent-save" class="btn btn-primary btn-sm">Save Profile</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compare Neighborhoods Modal -->
+  <div id="compare-modal" class="calc-modal hidden">
+    <div class="calc-content">
+      <div class="calc-header">
+        <h3>Compare Neighborhoods</h3>
+        <button id="compare-modal-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="calc-body">
+        <div class="calc-input-group" style="margin-bottom:16px">
+          <label>Enter 2–5 zip codes (comma separated)</label>
+          <input type="text" id="compare-zips" placeholder="78701, 78704, 78745">
+        </div>
+        <button id="compare-generate" class="btn btn-primary btn-full">Generate Comparison Report</button>
       </div>
     </div>
   </div>

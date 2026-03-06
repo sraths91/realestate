@@ -40,6 +40,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initCalculator();
   initAlerts();
   initSavedSearches();
+  initAgentSettings();
+  initCompare();
   checkApiStatus();
 });
 
@@ -1899,6 +1901,7 @@ function renderSavedDrawer() {
       ${saved.notes ? `<div class="sp-notes">${saved.notes}</div>` : ''}
       <div class="sp-actions">
         <button class="sp-calc-btn" data-idx="${i}" title="Investment Calculator">Calculator</button>
+        ${saved.id ? `<button class="sp-report-btn" data-id="${saved.id}" title="Generate PDF Report">Report</button>` : ''}
       </div>
     `;
     list.appendChild(el);
@@ -1924,6 +1927,13 @@ function renderSavedDrawer() {
     btn.addEventListener('click', (e) => {
       const idx = parseInt(e.target.dataset.idx);
       openCalculator(state.savedProperties[idx]);
+    });
+  });
+
+  // Report buttons
+  list.querySelectorAll('.sp-report-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      generatePropertyReport(e.target.dataset.id);
     });
   });
 }
@@ -2416,5 +2426,124 @@ async function deleteSavedSearch(id) {
     toast('Search deleted', 'success');
   } catch {
     toast('Failed to delete search', 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Settings
+// ---------------------------------------------------------------------------
+function initAgentSettings() {
+  const btn = $('agent-settings-btn');
+  const modal = $('agent-modal');
+  if (!btn || !modal) return;
+
+  btn.addEventListener('click', openAgentSettings);
+  $('agent-modal-close')?.addEventListener('click', () => hide(modal));
+  modal.addEventListener('click', (e) => { if (e.target === modal) hide(modal); });
+  $('agent-save')?.addEventListener('click', saveAgentProfile);
+}
+
+async function openAgentSettings() {
+  const modal = $('agent-modal');
+  show(modal);
+  try {
+    const res = await fetch('/api/agent/profile');
+    if (res.ok) {
+      const p = await res.json();
+      $('agent-name').value = p.name || '';
+      $('agent-email').value = p.email || '';
+      $('agent-phone').value = p.phone || '';
+      $('agent-brand-color').value = p.brand_color || '#5b8df9';
+      $('agent-tagline').value = p.tagline || '';
+    }
+  } catch { /* use defaults */ }
+}
+
+async function saveAgentProfile() {
+  try {
+    const res = await fetch('/api/agent/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: $('agent-name').value.trim(),
+        email: $('agent-email').value.trim(),
+        phone: $('agent-phone').value.trim(),
+        brandColor: $('agent-brand-color').value.trim(),
+        tagline: $('agent-tagline').value.trim(),
+      }),
+    });
+    if (res.ok) {
+      toast('Profile saved!', 'success');
+      hide($('agent-modal'));
+    } else {
+      toast('Failed to save profile', 'error');
+    }
+  } catch {
+    toast('Failed to save profile', 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Report Generation
+// ---------------------------------------------------------------------------
+async function generatePropertyReport(savedId) {
+  toast('Generating report...', 'info');
+  try {
+    const res = await fetch(`/api/reports/property/${savedId}`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Failed to generate report', 'error');
+      return;
+    }
+    const data = await res.json();
+    window.open(`/report.html?id=${data.reportId}`, '_blank');
+  } catch {
+    toast('Failed to generate report', 'error');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Compare Neighborhoods
+// ---------------------------------------------------------------------------
+function initCompare() {
+  const btn = $('compare-neighborhoods-btn');
+  const modal = $('compare-modal');
+  if (!btn || !modal) return;
+
+  btn.addEventListener('click', () => show(modal));
+  $('compare-modal-close')?.addEventListener('click', () => hide(modal));
+  modal.addEventListener('click', (e) => { if (e.target === modal) hide(modal); });
+  $('compare-generate')?.addEventListener('click', generateComparisonReport);
+}
+
+async function generateComparisonReport() {
+  const input = $('compare-zips')?.value.trim();
+  if (!input) {
+    toast('Enter at least 2 zip codes', 'error');
+    return;
+  }
+  const zipCodes = input.split(',').map(z => z.trim()).filter(z => /^\d{5}$/.test(z));
+  if (zipCodes.length < 2) {
+    toast('Enter at least 2 valid 5-digit zip codes', 'error');
+    return;
+  }
+
+  toast('Generating comparison report...', 'info');
+  try {
+    const res = await fetch('/api/reports/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ zipCodes }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Failed to generate report', 'error');
+      return;
+    }
+    const data = await res.json();
+    hide($('compare-modal'));
+    window.open(`/report.html?id=${data.reportId}`, '_blank');
+  } catch {
+    toast('Failed to generate report', 'error');
   }
 }

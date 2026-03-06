@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Property Report — PropScout</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --brand: #5b8df9; --green: #34d399; --red: #f87171; --yellow: #fbbf24; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #fff; color: #1a1a2e; line-height: 1.6; padding: 0; }
+    .report-page { max-width: 800px; margin: 0 auto; padding: 40px 32px; }
+    .report-loading { text-align: center; padding: 120px 0; color: #666; }
+    .report-error { text-align: center; padding: 120px 0; color: #dc2626; }
+
+    /* Header */
+    .report-header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 20px; border-bottom: 3px solid var(--brand); margin-bottom: 32px; }
+    .agent-info h1 { font-size: 1.4rem; font-weight: 800; color: var(--brand); }
+    .agent-info p { font-size: 0.85rem; color: #666; }
+    .agent-contact { text-align: right; font-size: 0.85rem; color: #444; }
+    .agent-tagline { font-style: italic; color: #888; font-size: 0.8rem; margin-top: 4px; }
+
+    /* Property Card */
+    .property-hero { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px; margin-bottom: 24px; }
+    .property-hero h2 { font-size: 1.6rem; font-weight: 800; margin-bottom: 8px; }
+    .property-meta { display: flex; gap: 16px; flex-wrap: wrap; color: #555; font-size: 0.9rem; }
+    .property-meta span { display: flex; align-items: center; gap: 4px; }
+    .price-row { display: flex; gap: 24px; margin-top: 16px; align-items: baseline; }
+    .current-price { font-size: 2rem; font-weight: 800; color: var(--brand); }
+    .saved-price { font-size: 0.9rem; color: #888; }
+    .price-change { font-weight: 700; font-size: 0.9rem; }
+    .price-change.up { color: var(--green); }
+    .price-change.down { color: var(--red); }
+
+    /* Sections */
+    .report-section { margin-bottom: 28px; }
+    .report-section h3 { font-size: 1.1rem; font-weight: 700; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 2px solid #e2e8f0; }
+
+    /* Momentum Gauge */
+    .momentum-display { display: flex; align-items: center; gap: 24px; }
+    .gauge-circle { width: 100px; height: 100px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 2rem; font-weight: 800; color: #fff; flex-shrink: 0; }
+    .gauge-high { background: linear-gradient(135deg, #34d399, #10b981); }
+    .gauge-mid { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+    .gauge-low { background: linear-gradient(135deg, #f87171, #ef4444); }
+    .momentum-details { flex: 1; }
+    .momentum-details .trend { font-size: 1.1rem; font-weight: 700; margin-bottom: 8px; }
+    .factors-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .factor-item { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 4px 0; }
+    .factor-item .label { color: #666; }
+    .factor-item .value { font-weight: 600; }
+
+    /* Narrative */
+    .narrative-box { background: #f0f4ff; border-left: 4px solid var(--brand); padding: 16px 20px; border-radius: 0 8px 8px 0; font-size: 0.95rem; line-height: 1.7; }
+    .narrative-source { font-size: 0.7rem; color: #999; margin-top: 8px; text-transform: uppercase; }
+
+    /* Stats Grid */
+    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .stat-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; text-align: center; }
+    .stat-card .stat-val { font-size: 1.3rem; font-weight: 800; color: #1a1a2e; }
+    .stat-card .stat-lbl { font-size: 0.75rem; color: #888; text-transform: uppercase; }
+
+    /* Comparison Table */
+    .compare-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    .compare-table th { background: #f1f5f9; padding: 10px 12px; text-align: left; font-weight: 700; border-bottom: 2px solid #e2e8f0; }
+    .compare-table td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; }
+    .compare-table tr:nth-child(even) { background: #f8fafc; }
+
+    /* Footer */
+    .report-footer { margin-top: 40px; padding-top: 16px; border-top: 2px solid #e2e8f0; text-align: center; font-size: 0.75rem; color: #999; }
+
+    /* Print Actions */
+    .print-actions { display: flex; gap: 8px; justify-content: center; margin-bottom: 24px; }
+    .print-actions button { padding: 10px 24px; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.9rem; }
+    .btn-print { background: var(--brand); color: #fff; }
+    .btn-print:hover { background: #4a7ce8; }
+    .btn-back { background: #e2e8f0; color: #333; }
+    .btn-back:hover { background: #d1d5db; }
+
+    @media print {
+      .print-actions { display: none !important; }
+      body { padding: 0; }
+      .report-page { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="report-page">
+    <div class="print-actions" id="print-actions">
+      <button class="btn-back" onclick="window.history.back()">Back</button>
+      <button class="btn-print" onclick="window.print()">Print / Save PDF</button>
+    </div>
+    <div id="report-content">
+      <div class="report-loading" id="report-loading">Loading report...</div>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const reportId = params.get('id');
+
+    if (!reportId) {
+      document.getElementById('report-content').innerHTML = '<div class="report-error">No report ID provided.</div>';
+    } else {
+      loadReport(reportId);
+    }
+
+    async function loadReport(id) {
+      try {
+        const res = await fetch(`/api/reports/${id}`);
+        if (!res.ok) throw new Error('Report not found');
+        const report = await res.json();
+        if (report.type === 'property') renderPropertyReport(report.data);
+        else if (report.type === 'compare') renderCompareReport(report.data);
+        else document.getElementById('report-content').innerHTML = '<div class="report-error">Unknown report type.</div>';
+      } catch (err) {
+        document.getElementById('report-content').innerHTML = `<div class="report-error">${err.message}</div>`;
+      }
+    }
+
+    function fmtCurrency(n) {
+      if (!n) return '--';
+      return '$' + Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    }
+
+    function renderPropertyReport(data) {
+      const { propertyData: p, momentumData: m, narrative: n, agentProfile: a, generatedAt } = data;
+      const brandColor = a?.brand_color || '#5b8df9';
+      document.documentElement.style.setProperty('--brand', brandColor);
+
+      let html = '';
+
+      // Header
+      html += `<div class="report-header">
+        <div class="agent-info">
+          <h1>${a?.name || 'PropScout'}</h1>
+          ${a?.tagline ? `<div class="agent-tagline">${a.tagline}</div>` : ''}
+        </div>
+        <div class="agent-contact">
+          ${a?.email ? `<div>${a.email}</div>` : ''}
+          ${a?.phone ? `<div>${a.phone}</div>` : ''}
+          <div style="font-size:0.7rem;color:#aaa">Generated ${new Date(generatedAt).toLocaleDateString()}</div>
+        </div>
+      </div>`;
+
+      // Property Hero
+      const change = p.currentPrice && p.savedPrice ? ((p.currentPrice - p.savedPrice) / p.savedPrice * 100).toFixed(1) : null;
+      html += `<div class="property-hero">
+        <h2>${p.address || 'Property Report'}</h2>
+        <div class="property-meta">
+          ${p.propertyType ? `<span>${p.propertyType}</span>` : ''}
+          ${p.bedrooms ? `<span>${p.bedrooms} bed</span>` : ''}
+          ${p.bathrooms ? `<span>${p.bathrooms} bath</span>` : ''}
+          ${p.squareFootage ? `<span>${Number(p.squareFootage).toLocaleString()} sqft</span>` : ''}
+          ${p.yearBuilt ? `<span>Built ${p.yearBuilt}</span>` : ''}
+        </div>
+        <div class="price-row">
+          <span class="current-price">${fmtCurrency(p.currentPrice || p.estimatedValue)}</span>
+          ${p.savedPrice ? `<span class="saved-price">Saved at ${fmtCurrency(p.savedPrice)}</span>` : ''}
+          ${change ? `<span class="price-change ${Number(change) >= 0 ? 'up' : 'down'}">${Number(change) >= 0 ? '+' : ''}${change}%</span>` : ''}
+        </div>
+      </div>`;
+
+      // Momentum
+      if (m && m.score != null) {
+        const cls = m.score >= 65 ? 'gauge-high' : m.score >= 45 ? 'gauge-mid' : 'gauge-low';
+        const trendText = m.score >= 65 ? 'Strong Upward Momentum' : m.score >= 45 ? 'Stable Market' : 'Cooling Market';
+        let factorsHtml = '';
+        if (m.factors) {
+          const entries = Object.entries(m.factors).slice(0, 6);
+          factorsHtml = entries.map(([k, v]) => `<div class="factor-item"><span class="label">${k.replace(/_/g, ' ')}</span><span class="value">${typeof v === 'number' ? v.toFixed ? v.toFixed(1) : v : v}</span></div>`).join('');
+        }
+        html += `<div class="report-section">
+          <h3>Market Momentum</h3>
+          <div class="momentum-display">
+            <div class="gauge-circle ${cls}">${m.score}</div>
+            <div class="momentum-details">
+              <div class="trend">${trendText}</div>
+              <div class="factors-grid">${factorsHtml}</div>
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // AI Narrative
+      if (n && n.text) {
+        html += `<div class="report-section">
+          <h3>Market Analysis</h3>
+          <div class="narrative-box">
+            ${n.text}
+            <div class="narrative-source">Analysis by ${n.source === 'claude' ? 'Claude AI' : n.source === 'openai' ? 'OpenAI' : 'PropScout Engine'}</div>
+          </div>
+        </div>`;
+      }
+
+      // Property Details
+      html += `<div class="report-section">
+        <h3>Property Details</h3>
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-val">${fmtCurrency(p.estimatedValue || p.currentPrice)}</div><div class="stat-lbl">Est. Value</div></div>
+          ${p.rentEstimate ? `<div class="stat-card"><div class="stat-val">${fmtCurrency(p.rentEstimate)}/mo</div><div class="stat-lbl">Rent Est.</div></div>` : ''}
+          ${p.squareFootage && (p.estimatedValue || p.currentPrice) ? `<div class="stat-card"><div class="stat-val">${fmtCurrency(Math.round((p.estimatedValue || p.currentPrice) / p.squareFootage))}</div><div class="stat-lbl">Per Sqft</div></div>` : ''}
+          ${p.lotSize ? `<div class="stat-card"><div class="stat-val">${Number(p.lotSize).toLocaleString()}</div><div class="stat-lbl">Lot Sqft</div></div>` : ''}
+          ${p.lastSalePrice ? `<div class="stat-card"><div class="stat-val">${fmtCurrency(p.lastSalePrice)}</div><div class="stat-lbl">Last Sale</div></div>` : ''}
+          ${p.lastSaleDate ? `<div class="stat-card"><div class="stat-val">${p.lastSaleDate}</div><div class="stat-lbl">Sale Date</div></div>` : ''}
+        </div>
+      </div>`;
+
+      // Footer
+      html += `<div class="report-footer">
+        <p>Report generated by PropScout${a?.name ? ` for ${a.name}` : ''} on ${new Date(generatedAt).toLocaleString()}</p>
+        <p>Data sourced from public records and third-party APIs. Values are estimates only.</p>
+      </div>`;
+
+      document.getElementById('report-content').innerHTML = html;
+    }
+
+    function renderCompareReport(data) {
+      const { comparisons, agentProfile: a, generatedAt } = data;
+      const brandColor = a?.brand_color || '#5b8df9';
+      document.documentElement.style.setProperty('--brand', brandColor);
+
+      let html = '';
+
+      // Header
+      html += `<div class="report-header">
+        <div class="agent-info">
+          <h1>${a?.name || 'PropScout'} — Neighborhood Comparison</h1>
+          ${a?.tagline ? `<div class="agent-tagline">${a.tagline}</div>` : ''}
+        </div>
+        <div class="agent-contact">
+          ${a?.email ? `<div>${a.email}</div>` : ''}
+          <div style="font-size:0.7rem;color:#aaa">Generated ${new Date(generatedAt).toLocaleDateString()}</div>
+        </div>
+      </div>`;
+
+      // Comparison Table
+      html += `<div class="report-section">
+        <h3>Zip Code Comparison</h3>
+        <table class="compare-table">
+          <thead><tr>
+            <th>Zip Code</th>
+            <th>Momentum</th>
+            <th>Home Value (ZHVI)</th>
+            <th>1yr Change</th>
+            <th>5yr Change</th>
+          </tr></thead>
+          <tbody>`;
+
+      for (const c of comparisons) {
+        const score = c.momentum?.score ?? '--';
+        const val = c.zhvi?.currentValue ? fmtCurrency(c.zhvi.currentValue) : '--';
+        const yoy = c.zhvi?.yoyChange != null ? (c.zhvi.yoyChange >= 0 ? '+' : '') + c.zhvi.yoyChange.toFixed(1) + '%' : '--';
+        const fiveYr = c.zhvi?.fiveYearChange != null ? (c.zhvi.fiveYearChange >= 0 ? '+' : '') + c.zhvi.fiveYearChange.toFixed(1) + '%' : '--';
+        html += `<tr>
+          <td><strong>${c.zip}</strong></td>
+          <td>${score !== '--' ? `<span style="color:${score >= 65 ? '#10b981' : score >= 45 ? '#f59e0b' : '#ef4444'};font-weight:700">${score}</span>` : '--'}</td>
+          <td>${val}</td>
+          <td style="color:${String(yoy).startsWith('+') ? '#10b981' : String(yoy).startsWith('-') ? '#ef4444' : '#666'}">${yoy}</td>
+          <td style="color:${String(fiveYr).startsWith('+') ? '#10b981' : String(fiveYr).startsWith('-') ? '#ef4444' : '#666'}">${fiveYr}</td>
+        </tr>`;
+      }
+
+      html += `</tbody></table></div>`;
+
+      // Individual momentum cards
+      for (const c of comparisons) {
+        if (!c.momentum) continue;
+        const cls = c.momentum.score >= 65 ? 'gauge-high' : c.momentum.score >= 45 ? 'gauge-mid' : 'gauge-low';
+        let factorsHtml = '';
+        if (c.momentum.factors) {
+          factorsHtml = Object.entries(c.momentum.factors).slice(0, 6)
+            .map(([k, v]) => `<div class="factor-item"><span class="label">${k.replace(/_/g, ' ')}</span><span class="value">${typeof v === 'number' && v.toFixed ? v.toFixed(1) : v}</span></div>`)
+            .join('');
+        }
+        html += `<div class="report-section">
+          <h3>${c.zip} — Momentum Breakdown</h3>
+          <div class="momentum-display">
+            <div class="gauge-circle ${cls}">${c.momentum.score}</div>
+            <div class="momentum-details">
+              <div class="factors-grid">${factorsHtml}</div>
+            </div>
+          </div>
+        </div>`;
+      }
+
+      html += `<div class="report-footer">
+        <p>Report generated by PropScout on ${new Date(generatedAt).toLocaleString()}</p>
+        <p>Data sourced from Zillow ZHVI, Census ACS, FBI Crime Data, and local market indicators.</p>
+      </div>`;
+
+      document.getElementById('report-content').innerHTML = html;
+    }
+  </script>
+</body>
+</html>
