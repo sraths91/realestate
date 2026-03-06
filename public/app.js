@@ -20,6 +20,9 @@ const state = {
   heatLayer: null,
   heatEnabled: false,
   heatMetric: 'home-value',
+  alerts: [],
+  unreadAlertCount: 0,
+  savedSearches: [],
 };
 
 // ---------------------------------------------------------------------------
@@ -35,6 +38,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initHeatmap();
   initSaved();
   initCalculator();
+  initAlerts();
+  initSavedSearches();
   checkApiStatus();
 });
 
@@ -2112,4 +2117,304 @@ function initCalculator() {
   ['calc-price', 'calc-rent', 'calc-down', 'calc-rate', 'calc-term', 'calc-expenses'].forEach(id => {
     $(id).addEventListener('input', calculateInvestment);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Alerts
+// ---------------------------------------------------------------------------
+function initAlerts() {
+  const toggle = $('alert-toggle');
+  const drawer = $('alert-drawer');
+  if (!toggle || !drawer) return;
+
+  toggle.addEventListener('click', toggleAlertDrawer);
+  $('close-alert-drawer')?.addEventListener('click', () => hide(drawer));
+  $('mark-all-read')?.addEventListener('click', markAllAlertsRead);
+
+  // Poll unread count every 60s
+  fetchAlertCount();
+  setInterval(fetchAlertCount, 60000);
+}
+
+async function fetchAlertCount() {
+  try {
+    const res = await fetch('/api/alerts/count');
+    if (!res.ok) return;
+    const data = await res.json();
+    state.unreadAlertCount = data.unread || 0;
+    updateAlertBadge();
+  } catch { /* offline */ }
+}
+
+function updateAlertBadge() {
+  const badge = $('alert-badge');
+  if (!badge) return;
+  if (state.unreadAlertCount > 0) {
+    badge.textContent = state.unreadAlertCount > 99 ? '99+' : state.unreadAlertCount;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function toggleAlertDrawer() {
+  const drawer = $('alert-drawer');
+  if (drawer.classList.contains('hidden')) {
+    show(drawer);
+    loadAlerts();
+  } else {
+    hide(drawer);
+  }
+}
+
+async function loadAlerts() {
+  try {
+    const res = await fetch('/api/alerts?limit=50');
+    if (!res.ok) return;
+    state.alerts = await res.json();
+    renderAlertDrawer();
+  } catch { /* offline */ }
+}
+
+function renderAlertDrawer() {
+  const list = $('alert-list');
+  const empty = $('alert-empty');
+  if (!list) return;
+
+  if (!state.alerts.length) {
+    list.innerHTML = '';
+    show(empty);
+    return;
+  }
+  hide(empty);
+
+  const iconMap = {
+    new_listing: { cls: 'new-listing', icon: '🏠' },
+    price_drop: { cls: 'price-drop', icon: '📉' },
+    price_increase: { cls: 'price-increase', icon: '📈' },
+    momentum_change: { cls: 'momentum-change', icon: '📊' },
+  };
+
+  list.innerHTML = state.alerts.map(a => {
+    const info = iconMap[a.type] || { cls: 'new-listing', icon: '🔔' };
+    const data = typeof a.data === 'string' ? JSON.parse(a.data || '{}') : (a.data || {});
+    let detail = '';
+    if (a.type === 'price_drop') {
+      detail = data.oldPrice && data.newPrice
+        ? `${fmtCurrency(data.oldPrice)} → ${fmtCurrency(data.newPrice)}`
+        : 'Price decreased';
+    } else if (a.type === 'price_increase') {
+      detail = data.oldPrice && data.newPrice
+        ? `${fmtCurrency(data.oldPrice)} → ${fmtCurrency(data.newPrice)}`
+        : 'Price increased';
+    } else if (a.type === 'new_listing') {
+      detail = data.price ? fmtCurrency(data.price) : 'New listing found';
+    } else if (a.type === 'momentum_change') {
+      detail = data.oldScore != null && data.newScore != null
+        ? `Score: ${data.oldScore} → ${data.newScore}`
+        : 'Momentum shifted';
+    }
+    const typeName = a.type.replace(/_/g, ' ');
+    return `<div class="alert-item ${a.read ? '' : 'unread'}" data-id="${a.id}">
+      <div class="alert-icon ${info.cls}">${info.icon}</div>
+      <div class="alert-body">
+        <div class="alert-type">${typeName}</div>
+        <div class="alert-address">${a.property_address || 'Saved search match'}</div>
+        <div class="alert-detail">${detail}</div>
+        <div class="alert-time">${formatTimeAgo(a.created_at)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Mark as read on click
+  list.querySelectorAll('.alert-item.unread').forEach(el => {
+    el.addEventListener('click', () => markAlertRead(el.dataset.id));
+  });
+}
+
+async function markAlertRead(id) {
+  try {
+    await fetch(`/api/alerts/${id}/read`, { method: 'PUT' });
+    const alert = state.alerts.find(a => a.id === Number(id));
+    if (alert) alert.read = 1;
+    state.unreadAlertCount = Math.max(0, state.unreadAlertCount - 1);
+    updateAlertBadge();
+    const el = document.querySelector(`.alert-item[data-id="${id}"]`);
+    if (el) el.classList.remove('unread');
+  } catch { /* offline */ }
+}
+
+async function markAllAlertsRead() {
+  try {
+    await fetch('/api/alerts/read-all', { method: 'POST' });
+    state.alerts.forEach(a => a.read = 1);
+    state.unreadAlertCount = 0;
+    updateAlertBadge();
+    document.querySelectorAll('.alert-item.unread').forEach(el => el.classList.remove('unread'));
+    toast('All alerts marked as read', 'success');
+  } catch { /* offline */ }
+}
+
+function formatTimeAgo(dateStr) {
+  if (!dateStr) return '';
+  const now = Date.now();
+  const then = new Date(dateStr + (dateStr.includes('Z') ? '' : 'Z')).getTime();
+  const diffMs = now - then;
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(then).toLocaleDateString();
+}
+
+// ---------------------------------------------------------------------------
+// Saved Searches
+// ---------------------------------------------------------------------------
+function initSavedSearches() {
+  const saveBtn = $('save-search-btn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', saveCurrentSearch);
+  }
+  loadSavedSearches();
+}
+
+async function loadSavedSearches() {
+  try {
+    const res = await fetch('/api/saved-searches');
+    if (!res.ok) return;
+    state.savedSearches = await res.json();
+    renderSavedSearches();
+  } catch { /* offline */ }
+}
+
+function saveCurrentSearch() {
+  const city = $('scan-city')?.value.trim() || '';
+  const st = $('scan-state')?.value.trim() || '';
+  const zip = $('scan-zip')?.value.trim() || '';
+
+  if (!city && !zip) {
+    toast('Enter a city or zip code first', 'error');
+    return;
+  }
+
+  const type = $('scan-type')?.value || '';
+  const priceMin = $('scan-price-min')?.value || '';
+  const priceMax = $('scan-price-max')?.value || '';
+  const beds = document.querySelector('#scan-beds-group .btn-toggle.active')?.dataset.val || '';
+  const baths = document.querySelector('#scan-baths-group .btn-toggle.active')?.dataset.val || '';
+
+  const parts = [];
+  if (city) parts.push(city);
+  if (st) parts.push(st);
+  if (zip) parts.push(zip);
+  const name = parts.join(', ');
+
+  const filters = { city, state: st, zipCode: zip, type, priceMin, priceMax, beds, baths };
+
+  doSaveSearch(name, filters);
+}
+
+async function doSaveSearch(name, filters) {
+  try {
+    const res = await fetch('/api/saved-searches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, filters }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Failed to save search', 'error');
+      return;
+    }
+    toast('Search saved! You\'ll get alerts for new matches.', 'success');
+    loadSavedSearches();
+  } catch {
+    toast('Failed to save search', 'error');
+  }
+}
+
+function renderSavedSearches() {
+  const container = $('saved-searches-list');
+  if (!container) return;
+
+  if (!state.savedSearches.length) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = state.savedSearches.map(ss => {
+    const f = typeof ss.filters === 'string' ? JSON.parse(ss.filters) : ss.filters;
+    const parts = [];
+    if (f.city) parts.push(f.city);
+    if (f.state) parts.push(f.state);
+    if (f.zipCode) parts.push(f.zipCode);
+    if (f.priceMin || f.priceMax) parts.push(`$${f.priceMin || '0'}-$${f.priceMax || '∞'}`);
+    const summary = parts.slice(1).join(' · ') || '';
+
+    return `<div class="saved-search-item" data-id="${ss.id}">
+      <span class="ss-name">${ss.name}</span>
+      <span class="ss-summary">${summary}</span>
+      <div class="ss-actions">
+        <button class="ss-run" title="Run search" onclick="runSavedSearch(${ss.id})">▶</button>
+        <button class="ss-delete" title="Delete" onclick="deleteSavedSearch(${ss.id})">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function runSavedSearch(id) {
+  const ss = state.savedSearches.find(s => s.id === id);
+  if (!ss) return;
+
+  const f = typeof ss.filters === 'string' ? JSON.parse(ss.filters) : ss.filters;
+
+  // Populate scanner filters
+  if ($('scan-city')) $('scan-city').value = f.city || '';
+  if ($('scan-state')) $('scan-state').value = f.state || '';
+  if ($('scan-zip')) $('scan-zip').value = f.zipCode || '';
+  if ($('scan-type')) $('scan-type').value = f.type || '';
+  if ($('scan-price-min')) $('scan-price-min').value = f.priceMin || '';
+  if ($('scan-price-max')) $('scan-price-max').value = f.priceMax || '';
+
+  // Activate correct bed/bath toggles
+  setToggleActive('scan-beds-group', f.beds);
+  setToggleActive('scan-baths-group', f.baths);
+
+  // Switch to scanner tab
+  document.querySelector('.tab-btn[data-tab="scanner"]')?.click();
+
+  // Run the scan
+  performScan();
+}
+
+function setToggleActive(groupId, val) {
+  const group = $(groupId);
+  if (!group) return;
+  const btns = group.querySelectorAll('.btn-toggle');
+  btns.forEach(b => b.classList.remove('active'));
+  if (val) {
+    const match = Array.from(btns).find(b => b.dataset.val === val);
+    if (match) match.classList.add('active');
+    else btns[0]?.classList.add('active');
+  } else {
+    btns[0]?.classList.add('active');
+  }
+}
+
+async function deleteSavedSearch(id) {
+  try {
+    const res = await fetch(`/api/saved-searches/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      toast('Failed to delete search', 'error');
+      return;
+    }
+    state.savedSearches = state.savedSearches.filter(s => s.id !== id);
+    renderSavedSearches();
+    toast('Search deleted', 'success');
+  } catch {
+    toast('Failed to delete search', 'error');
+  }
 }

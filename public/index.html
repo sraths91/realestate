@@ -40,6 +40,10 @@
         </button>
       </nav>
       <div class="header-actions">
+        <button class="btn-alert-toggle" id="alert-toggle" title="Alerts">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+          <span class="alert-badge hidden" id="alert-badge">0</span>
+        </button>
         <button class="btn-saved-toggle" id="saved-toggle" title="Saved Properties">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
           <span class="saved-count" id="saved-count">0</span>
@@ -245,6 +249,11 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/><path d="M8 12h8M12 8v8"/></svg>
             Scan Properties
           </button>
+          <button id="save-search-btn" class="btn btn-secondary btn-full" style="margin-top:8px;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            Save This Search
+          </button>
+          <div id="saved-searches-list" class="saved-searches-list"></div>
         </aside>
         <div class="scanner-results">
           <div id="scan-summary" class="scan-summary hidden">
@@ -475,6 +484,21 @@
     </div>
   </div>
   <div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
+
+  <!-- Alert Drawer -->
+  <div id="alert-drawer" class="alert-drawer hidden">
+    <div class="drawer-header">
+      <h3>Alerts</h3>
+      <div class="drawer-actions">
+        <button id="mark-all-read" class="btn btn-secondary btn-sm">Mark all read</button>
+        <button id="close-alert-drawer" class="btn-icon">&times;</button>
+      </div>
+    </div>
+    <div id="alert-list" class="alert-list"></div>
+    <div id="alert-empty" class="alert-empty-state">
+      <p>No alerts yet. Save a search to start receiving price drop and new listing notifications.</p>
+    </div>
+  </div>
 
   <!-- Investment Calculator Modal -->
   <div id="calc-modal" class="calc-modal hidden">

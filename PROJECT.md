@@ -270,10 +270,132 @@ When a user queries a zip code, the server:
 - [ ] User accounts with login (future)
 - [ ] Live price-drop alerts (future)
 
-### Phase 4: Polish + Differentiation
-- [ ] Side-by-side neighborhood momentum comparison
-- [ ] Historical momentum trend charts (using stored snapshots)
-- [ ] White-labeled client portals
-- [ ] Value tracker — document agent contributions (showings, negotiations)
-- [ ] Email delivery for market reports
-- [ ] Mobile-optimized touch interactions
+### Phase 4: Smart Alerts + Saved Search Engine
+*Make PropScout a daily-check tool instead of an occasional lookup.*
+
+**Saved Searches:**
+- [ ] `saved_searches` SQLite table — persist Scanner filter configurations (location, price range, beds, baths, type)
+- [ ] Save/load/delete search presets from Scanner tab
+- [ ] Re-run saved searches on demand with one click
+
+**Automated Detection (Background Jobs):**
+- [ ] `alerts` SQLite table — (id, type, search_id, property_id, data JSON, read, created_at)
+- [ ] Background scan loop (`setInterval` every 6 hours) — re-runs saved searches, diffs against `listing_snapshots`
+- [ ] Price drop detection — flag listings whose price decreased since last snapshot
+- [ ] New listing detection — flag listings not present in previous scan for a saved search
+- [ ] Momentum score change alerts — weekly re-compute for saved zips, flag +/-5 point moves
+
+**Alert UI:**
+- [ ] Notification bell icon in header with unread badge count
+- [ ] Alert drawer/panel — grouped by type (price drops, new listings, momentum changes)
+- [ ] Mark read/dismiss individual alerts
+- [ ] `GET /api/alerts` — returns alerts since last check, supports `?unread=true`
+- [ ] `GET /api/digest` — daily digest endpoint aggregating all alert types
+
+**Why this phase first:** Alerts create a daily check-in habit. Without them, users Google "property lookup" and forget PropScout exists. Every competitor (PropStream, Privy, Redfin) has alert systems — this is table stakes for retention.
+
+### Phase 5: Market Report Generator + AI Narratives
+*Give agents a shareable artifact no free tool produces.*
+
+**One-Click Property Report:**
+- [ ] Server-side HTML → PDF generation (puppeteer or html-pdf-node)
+- [ ] Report sections: property summary with photo, 3-6 comps on map, price trend chart (ZHVI), momentum score with drivers, Deal Pulse signals, investment calculator results
+- [ ] `POST /api/reports/property/:id` — generates PDF, returns download URL
+- [ ] Report stored in `/data/reports/` with 30-day expiry
+
+**Neighborhood Comparison Report:**
+- [ ] Side-by-side 2-3 zip codes with momentum scores, ZHVI price history, safety, walkability, affordability
+- [ ] Comparison table + radar chart (6 momentum dimensions per zip)
+- [ ] `POST /api/reports/compare` — accepts array of zip codes
+
+**AI Narrative Summary:**
+- [ ] LLM-generated paragraph per property/neighborhood synthesizing all data points
+- [ ] Example: *"This 3BR in 78702 is priced 12% below median. The neighborhood scores 72/100 on momentum, driven by 5.1% YoY price growth and declining vacancy. Deal Pulse estimates a 68% chance of further price reduction within 30 days."*
+- [ ] `POST /api/ai/narrative` — accepts property + market data, returns prose
+- [ ] Optional `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` env var (falls back to template-based narrative without key)
+
+**Agent Branding:**
+- [ ] `agent_profiles` SQLite table — name, email, phone, logo URL, brand color, tagline
+- [ ] Branding applied to all PDF reports, portfolio pages, and email shares
+- [ ] Logo upload endpoint (`POST /api/agent/profile` with multipart form)
+- [ ] QR code on PDF linking to live portfolio dashboard
+
+**Why this phase second:** Shareable reports drive viral adoption — agents send them to clients, clients share with friends. Momentum + Deal Pulse data in a branded PDF is something no free tool (Zillow, Redfin, Realtor.com) offers.
+
+### Phase 6: Rental Revenue Analyzer + Enhanced Investment Suite
+*Close the Mashvisor gap with rental-specific analysis using existing API data.*
+
+**Rental Comp Lookup:**
+- [ ] Surface RentCast nearby rental comps per property — $/sqft, bed/bath match, distance, lease type
+- [ ] Rental comp cards in Search tab results (alongside sale comps)
+- [ ] `GET /api/rental-comps?address=&radius=` endpoint
+
+**Dual-Strategy Comparison:**
+- [ ] Traditional rental vs. short-term rental projections side by side per saved property
+- [ ] Traditional: RentCast rent estimate + vacancy rate + expense ratio
+- [ ] Short-term: estimated nightly rate × occupancy rate (Census ACS tourism data + seasonal adjustment)
+- [ ] Comparison table in investment calculator modal
+
+**Enhanced Heatmap + Analytics:**
+- [ ] "Rental Yield" heatmap layer — rent-to-price ratio by census tract (Census ACS median gross rent / median home value)
+- [ ] Vacancy rate display in momentum tab and investment calculator
+- [ ] Cap rate heatmap layer — estimated cap rates by tract
+
+**Cash Flow Scenario Modeling:**
+- [ ] Extend investment calculator with 3 scenarios: conservative / moderate / aggressive
+- [ ] Adjustable assumptions per scenario (vacancy, expense ratio, appreciation, rent growth)
+- [ ] Side-by-side comparison table with 5-year projections
+- [ ] Break-even rent calculator — "What rent do you need to break even at this purchase price?"
+
+**Portfolio-Level Analytics:**
+- [ ] Aggregate metrics across all saved properties — total monthly cash flow, average cap rate, portfolio DSCR, weighted CoC return
+- [ ] Diversification analysis by zip code and property type
+- [ ] Portfolio summary card in saved drawer
+
+**Why this phase third:** Deepens the investor value proposition. Mashvisor charges $50-250/mo for dual-strategy comparison — offering it free with PropScout's existing RentCast + Census data is a major differentiator.
+
+### Phase 7: Lightweight Client CRM + Engagement Tracking
+*Turn portfolios from a sharing feature into a relationship management tool.*
+
+**Client Contacts:**
+- [ ] `clients` SQLite table — (id, name, email, phone, type: buyer/seller/investor, notes, created_at)
+- [ ] Simple client management UI — add/edit/delete contacts
+- [ ] Link clients to portfolios — each portfolio assigned to a client
+
+**Portfolio View Tracking:**
+- [ ] `client_activity` SQLite table — (id, client_id, portfolio_id, event_type, metadata JSON, created_at)
+- [ ] Tracking pixel/endpoint on portfolio pages — log views with timestamp and IP geolocation
+- [ ] Agent dashboard: "Client X viewed your portfolio 3 times this week"
+- [ ] View count + last viewed timestamp on each shared portfolio
+
+**Email Sharing:**
+- [ ] `POST /api/share` — sends branded email with portfolio link + optional PDF attachment
+- [ ] Nodemailer integration (same pattern as password reset in UltiStats)
+- [ ] Email templates: portfolio share, market report, price drop alert
+- [ ] Optional `SMTP_HOST` / `SMTP_USER` / `SMTP_PASS` env vars
+
+**Follow-Up Intelligence:**
+- [ ] "You shared a portfolio with Jane 7 days ago and she hasn't viewed it — follow up?"
+- [ ] Client activity timeline — chronological log of shares, views, alerts per contact
+- [ ] Follow-up reminder alerts integrated into Phase 4 alert system
+
+**Natural Language Search:**
+- [ ] "Show me 3BR homes under $350K near good schools in Austin" → parsed into Scanner filters via LLM
+- [ ] `POST /api/ai/search` — accepts natural language, returns structured filter object
+- [ ] Search bar with NL mode toggle (structured filters ↔ free text)
+- [ ] Requires `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` (falls back to standard filters without key)
+
+**Why this phase last:** Compounds everything — alerts feed client timelines, reports get shared to clients, rental analysis enriches portfolio views. Light CRM + engagement tracking is what makes PropStream sticky at $99/mo. A lightweight version integrated with PropScout's analytics creates the same daily-use loop.
+
+---
+
+### Implementation Priority Rationale
+
+| Phase | Effort | Stickiness Impact | Competitive Edge |
+|-------|--------|-------------------|------------------|
+| **4: Smart Alerts** | Low-Med | Very High — daily check-in habit | Matches PropStream/Privy alerts |
+| **5: Market Reports** | Medium | High — shareable artifacts drive viral growth | Branded PDFs with Momentum + Deal Pulse (unique) |
+| **6: Rental Analyzer** | Medium | Med-High — captures investor segment | Closes Mashvisor gap using existing APIs |
+| **7: Client CRM** | Medium | Very High — relationship stickiness | Lightweight Follow Up Boss integrated with analytics |
+
+The order follows the **stickiness formula**: `Daily Alerts + Shared Client Artifacts + Compounding Data = Retention`. Alerts first because they create the habit. Reports second because they spread virally. Rental analysis third to deepen investor value. CRM last because it compounds all prior phases into a relationship management loop.

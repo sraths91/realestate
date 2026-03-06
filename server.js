@@ -110,13 +110,37 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS saved_searches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    filters TEXT NOT NULL,
+    last_run_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    search_id INTEGER,
+    property_address TEXT,
+    data TEXT,
+    read INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (search_id) REFERENCES saved_searches(id) ON DELETE SET NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_alerts_read ON alerts(read, created_at);
 `);
 
 // Cleanup old listing snapshots (keep 180 days)
 try {
   const deleted = db.prepare("DELETE FROM listing_snapshots WHERE created_at < datetime('now', '-180 days')").run();
   if (deleted.changes > 0) console.log(`Cleaned up ${deleted.changes} old listing snapshots`);
-} catch { /* ignore on first run */ }
+} catch (e) { /* ignore on first run */ }
+try {
+  const alertsDel = db.prepare("DELETE FROM alerts WHERE created_at < datetime('now', '-90 days')").run();
+  if (alertsDel.changes > 0) console.log(`Cleaned up ${alertsDel.changes} old alerts`);
+} catch (e) { /* ignore on first run */ }
 console.log('SQLite database initialized at', path.join(DATA_DIR, 'propscout.db'));
 
 // ===========================================================================
@@ -420,210 +444,171 @@ function normalizeZillowDetail(detail, fallbackAddr) {
 }
 
 // ===========================================================================
-// LISTINGS LOOKUP — RapidAPI Zillow → Realtor → RentCast → 404
+// LISTINGS LOOKUP — RapidAPI Zillow → Realtor → RentCast → null
 // ===========================================================================
+
+/**
+ * Reusable listing fetch — cascades through Zillow → Realtor → RentCast.
+ * @param {Object} filters - {location, city, state, zipCode, minPrice, maxPrice, beds, baths, limit}
+ * @returns {Object|null} {source, listings[], compNarrative, marketContext}
+ */
+async function fetchListings(filters) {
+  const { location, city, state, zipCode, minPrice, maxPrice, beds, baths, limit: lim } = filters;
+  const loc = location || (city && state ? `${city}, ${state}` : zipCode);
+  if (!loc) return null;
+
+  const cacheKey = `listings:${loc}:${JSON.stringify({ minPrice, maxPrice, beds, baths })}`.toLowerCase();
+  const cached = cacheGet(cacheKey);
+  if (cached) return { ...cached, cached: true };
+
+  let result = null;
+
+  // Source 1: RapidAPI Zillow
+  if (!result && RAPIDAPI_KEY) {
+    try {
+      const data = await zillowApiFetch('/propertyExtendedSearch', {
+        location: loc, status_type: 'ForSale', home_type: 'Houses',
+      });
+      const props = data?.props || data?.results || [];
+      if (Array.isArray(props) && props.length > 0) {
+        result = {
+          source: 'zillow',
+          listings: props.slice(0, 25).map(p => ({
+            address: p.streetAddress || p.address || '--',
+            city: p.city || null, state: p.state || null, zipCode: p.zipcode || null,
+            price: p.price ?? p.unformattedPrice ?? 0,
+            bedrooms: p.bedrooms ?? p.beds ?? null, bathrooms: p.bathrooms ?? p.baths ?? null,
+            squareFootage: p.livingArea ?? p.area ?? null,
+            propertyType: p.propertyType || p.homeType || null, yearBuilt: p.yearBuilt ?? null,
+            daysOnMarket: p.daysOnZillow ?? null,
+            latitude: p.latitude ?? null, longitude: p.longitude ?? null,
+            status: p.listingStatus || 'Active', imgSrc: p.imgSrc ?? null, zestimate: p.zestimate ?? null,
+          })),
+        };
+      }
+    } catch (err) { console.log('Zillow listings API failed:', err.message); }
+  }
+
+  // Source 2: RapidAPI Realtor.com
+  if (!result && RAPIDAPI_KEY) {
+    try {
+      const params = { limit: lim || 25, offset: 0, sort: 'newest' };
+      if (zipCode) { params.postal_code = zipCode; }
+      else if (city && state) { params.city = city; params.state_code = state; }
+      else {
+        const autoData = await realtorApiFetch('/locations/auto-complete', { input: loc });
+        const match = autoData?.autocomplete?.[0];
+        if (match) { params.city = match.city; params.state_code = match.state_code; }
+      }
+      if (minPrice) params.price_min = minPrice;
+      if (maxPrice) params.price_max = maxPrice;
+      if (beds) params.beds_min = beds;
+      if (baths) params.baths_min = baths;
+
+      const data = await realtorApiFetch('/properties/v2/list-for-sale', params);
+      const props = data?.properties || data?.data?.results || [];
+      if (Array.isArray(props) && props.length > 0) {
+        result = {
+          source: 'realtor',
+          listings: props.map(p => {
+            const addr = p.address || {};
+            return {
+              address: addr.line || '--', city: addr.city || null,
+              state: addr.state_code || null, zipCode: addr.postal_code || null,
+              price: p.list_price ?? p.price ?? 0,
+              bedrooms: p.beds ?? p.description?.beds ?? null,
+              bathrooms: p.baths ?? p.description?.baths ?? null,
+              squareFootage: p.sqft ?? p.building_size?.size ?? null,
+              propertyType: p.prop_type || null, yearBuilt: p.year_built ?? null,
+              daysOnMarket: null, latitude: addr.lat ?? null, longitude: addr.lon ?? null,
+              status: p.prop_status || 'for_sale', imgSrc: p.thumbnail ?? p.photos?.[0]?.href ?? null,
+            };
+          }),
+        };
+      }
+    } catch (err) { console.log('Realtor listings API failed:', err.message); }
+  }
+
+  // Source 3: RentCast
+  if (!result && RENTCAST_KEY) {
+    try {
+      const data = await rentcastFetch('/listings/sale', {
+        city, state, zipCode, bedrooms: beds, bathrooms: baths,
+        status: 'Active', priceMin: minPrice, priceMax: maxPrice, limit: lim || 25,
+      });
+      if (Array.isArray(data) && data.length > 0) {
+        result = {
+          source: 'rentcast',
+          listings: data.map(l => ({
+            address: l.formattedAddress || l.addressLine1, city: l.city, state: l.state,
+            zipCode: l.zipCode, price: l.price, bedrooms: l.bedrooms, bathrooms: l.bathrooms,
+            squareFootage: l.squareFootage, propertyType: l.propertyType,
+            latitude: l.latitude, longitude: l.longitude,
+            daysOnMarket: l.daysOnMarket, yearBuilt: l.yearBuilt, status: l.status,
+          })),
+        };
+      }
+    } catch (err) { console.log('RentCast listings failed:', err.message); }
+  }
+
+  if (!result) return null;
+
+  // Fetch market context for Deal Pulse enrichment
+  let marketContext = null;
+  const searchZip = zipCode || result.listings[0]?.zipCode;
+  if (searchZip) {
+    marketContext = getMarketContext(searchZip);
+    if (!marketContext && RENTCAST_KEY) {
+      try {
+        const data = await rentcastFetch('/markets', { zipCode: searchZip, historyRange: 12 });
+        if (data?.saleData || data?.rentalData) {
+          const sale = data.saleData || {};
+          db.prepare(`INSERT OR REPLACE INTO market_context_cache
+            (zip, median_dom, median_price, avg_ppsf, total_inventory, data_json)
+            VALUES (?, ?, ?, ?, ?, ?)`).run(searchZip,
+            sale.averageDaysOnMarket || sale.medianDaysOnMarket || null,
+            sale.medianPrice || sale.averagePrice || null,
+            sale.averagePricePerSquareFoot || null,
+            sale.totalInventory || null, JSON.stringify(data));
+          marketContext = {
+            medianDom: sale.averageDaysOnMarket || sale.medianDaysOnMarket,
+            medianPrice: sale.medianPrice || sale.averagePrice,
+            avgPpsf: sale.averagePricePerSquareFoot,
+            totalInventory: sale.totalInventory,
+          };
+        }
+      } catch (err) { console.log('RentCast market context failed:', err.message); }
+    }
+  }
+
+  // Save listing snapshots and detect price changes
+  if (result.listings) {
+    result.listings = saveAndEnrichSnapshots(result.listings, loc, result.source);
+  }
+
+  // Enrich with Deal Pulse + comp narrative
+  if (result.listings) {
+    result.listings = enrichWithDealPulse(result.listings, marketContext);
+  }
+  const compNarrative = generateCompNarrative(result.listings, marketContext);
+
+  const response = {
+    ...result, compNarrative,
+    marketContext: marketContext ? {
+      medianDom: marketContext.medianDom, medianPrice: marketContext.medianPrice,
+      avgPpsf: marketContext.avgPpsf, inventory: marketContext.totalInventory,
+    } : null,
+  };
+
+  cacheSet(cacheKey, response);
+  return response;
+}
+
 app.get('/api/listings-lookup', async (req, res) => {
   try {
-    const { location, city, state, zipCode, minPrice, maxPrice, beds, baths, limit } = req.query;
-    const loc = location || (city && state ? `${city}, ${state}` : zipCode);
-    if (!loc) return res.status(400).json({ error: 'Missing location/city/zipCode' });
-
-    const cacheKey = `listings:${loc}:${JSON.stringify({ minPrice, maxPrice, beds, baths })}`.toLowerCase();
-    const cached = cacheGet(cacheKey);
-    if (cached) return res.json({ ...cached, cached: true });
-
-    let result = null;
-
-    // Source 1: RapidAPI Zillow — property search
-    if (!result && RAPIDAPI_KEY) {
-      try {
-        const data = await zillowApiFetch('/propertyExtendedSearch', {
-          location: loc,
-          status_type: 'ForSale',
-          home_type: 'Houses',
-        });
-        const props = data?.props || data?.results || [];
-        if (Array.isArray(props) && props.length > 0) {
-          result = {
-            source: 'zillow',
-            listings: props.slice(0, 25).map(p => ({
-              address: p.streetAddress || p.address || '--',
-              city: p.city || null,
-              state: p.state || null,
-              zipCode: p.zipcode || null,
-              price: p.price ?? p.unformattedPrice ?? 0,
-              bedrooms: p.bedrooms ?? p.beds ?? null,
-              bathrooms: p.bathrooms ?? p.baths ?? null,
-              squareFootage: p.livingArea ?? p.area ?? null,
-              propertyType: p.propertyType || p.homeType || null,
-              yearBuilt: p.yearBuilt ?? null,
-              daysOnMarket: p.daysOnZillow ?? null,
-              latitude: p.latitude ?? null,
-              longitude: p.longitude ?? null,
-              status: p.listingStatus || 'Active',
-              imgSrc: p.imgSrc ?? null,
-              zestimate: p.zestimate ?? null,
-            })),
-          };
-        }
-      } catch (err) {
-        console.log('Zillow listings API failed:', err.message);
-      }
-    }
-
-    // Source 2: RapidAPI Realtor.com — for-sale listings
-    if (!result && RAPIDAPI_KEY) {
-      try {
-        const params = { limit: limit || 25, offset: 0, sort: 'newest' };
-        // Parse location into city/state or use zipCode
-        if (zipCode) {
-          params.postal_code = zipCode;
-        } else if (city && state) {
-          params.city = city;
-          params.state_code = state;
-        } else {
-          // Try autocomplete to resolve location
-          const autoData = await realtorApiFetch('/locations/auto-complete', { input: loc });
-          const match = autoData?.autocomplete?.[0];
-          if (match) {
-            params.city = match.city;
-            params.state_code = match.state_code;
-          }
-        }
-        if (minPrice) params.price_min = minPrice;
-        if (maxPrice) params.price_max = maxPrice;
-        if (beds) params.beds_min = beds;
-        if (baths) params.baths_min = baths;
-
-        const data = await realtorApiFetch('/properties/v2/list-for-sale', params);
-        const props = data?.properties || data?.data?.results || [];
-        if (Array.isArray(props) && props.length > 0) {
-          result = {
-            source: 'realtor',
-            listings: props.map(p => {
-              const addr = p.address || {};
-              return {
-                address: addr.line || '--',
-                city: addr.city || null,
-                state: addr.state_code || null,
-                zipCode: addr.postal_code || null,
-                price: p.list_price ?? p.price ?? 0,
-                bedrooms: p.beds ?? p.description?.beds ?? null,
-                bathrooms: p.baths ?? p.description?.baths ?? null,
-                squareFootage: p.sqft ?? p.building_size?.size ?? null,
-                propertyType: p.prop_type || null,
-                yearBuilt: p.year_built ?? null,
-                daysOnMarket: null,
-                latitude: addr.lat ?? null,
-                longitude: addr.lon ?? null,
-                status: p.prop_status || 'for_sale',
-                imgSrc: p.thumbnail ?? p.photos?.[0]?.href ?? null,
-              };
-            }),
-          };
-        }
-      } catch (err) {
-        console.log('Realtor listings API failed:', err.message);
-      }
-    }
-
-    // Source 3: RentCast — listings
-    if (!result && RENTCAST_KEY) {
-      try {
-        const data = await rentcastFetch('/listings/sale', {
-          city, state, zipCode, bedrooms: beds, bathrooms: baths,
-          status: 'Active', priceMin: minPrice, priceMax: maxPrice,
-          limit: limit || 25,
-        });
-        if (Array.isArray(data) && data.length > 0) {
-          result = {
-            source: 'rentcast',
-            listings: data.map(l => ({
-              address: l.formattedAddress || l.addressLine1,
-              city: l.city,
-              state: l.state,
-              zipCode: l.zipCode,
-              price: l.price,
-              bedrooms: l.bedrooms,
-              bathrooms: l.bathrooms,
-              squareFootage: l.squareFootage,
-              propertyType: l.propertyType,
-              latitude: l.latitude,
-              longitude: l.longitude,
-              daysOnMarket: l.daysOnMarket,
-              yearBuilt: l.yearBuilt,
-              status: l.status,
-            })),
-          };
-        }
-      } catch (err) {
-        console.log('RentCast listings failed:', err.message);
-      }
-    }
-
-    if (!result) {
-      return res.status(404).json({ error: 'No listings found from any source' });
-    }
-
-    // Fetch market context for Deal Pulse enrichment
-    let marketContext = null;
-    const searchZip = zipCode || result.listings[0]?.zipCode;
-    if (searchZip) {
-      marketContext = getMarketContext(searchZip);
-      if (!marketContext && RENTCAST_KEY) {
-        try {
-          const data = await rentcastFetch('/markets', { zipCode: searchZip, historyRange: 12 });
-          if (data?.saleData || data?.rentalData) {
-            const sale = data.saleData || {};
-            db.prepare(`INSERT OR REPLACE INTO market_context_cache
-              (zip, median_dom, median_price, avg_ppsf, total_inventory, data_json)
-              VALUES (?, ?, ?, ?, ?, ?)`).run(
-              searchZip,
-              sale.averageDaysOnMarket || sale.medianDaysOnMarket || null,
-              sale.medianPrice || sale.averagePrice || null,
-              sale.averagePricePerSquareFoot || null,
-              sale.totalInventory || null,
-              JSON.stringify(data)
-            );
-            marketContext = {
-              medianDom: sale.averageDaysOnMarket || sale.medianDaysOnMarket,
-              medianPrice: sale.medianPrice || sale.averagePrice,
-              avgPpsf: sale.averagePricePerSquareFoot,
-              totalInventory: sale.totalInventory,
-            };
-          }
-        } catch (err) {
-          console.log('RentCast market context failed:', err.message);
-        }
-      }
-    }
-
-    // Save listing snapshots and detect price changes
-    if (result.listings) {
-      result.listings = saveAndEnrichSnapshots(result.listings, loc, result.source);
-    }
-
-    // Enrich listings with Deal Pulse metrics
-    if (result.listings) {
-      result.listings = enrichWithDealPulse(result.listings, marketContext);
-    }
-
-    // Generate comp narrative
-    const compNarrative = generateCompNarrative(result.listings, marketContext);
-
-    const response = {
-      ...result,
-      compNarrative,
-      marketContext: marketContext ? {
-        medianDom: marketContext.medianDom,
-        medianPrice: marketContext.medianPrice,
-        avgPpsf: marketContext.avgPpsf,
-        inventory: marketContext.totalInventory,
-      } : null,
-    };
-
-    cacheSet(cacheKey, response);
-    res.json(response);
+    const result = await fetchListings(req.query);
+    if (!result) return res.status(404).json({ error: 'No listings found from any source' });
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1945,18 +1930,20 @@ app.get('/api/health', (req, res) => {
   sources.censusTract = 'active (free)';
   sources.zhvi = zhviLoaded ? 'active (Zillow CSV)' : 'loading...';
 
-  let zhviCount = 0, snapshotCount = 0, marketCacheCount = 0, savedCount = 0, portfolioCount = 0;
-  try { zhviCount = db.prepare('SELECT COUNT(*) as c FROM zhvi_data').get().c; } catch {}
-  try { snapshotCount = db.prepare('SELECT COUNT(*) as c FROM listing_snapshots').get().c; } catch {}
-  try { marketCacheCount = db.prepare('SELECT COUNT(*) as c FROM market_context_cache').get().c; } catch {}
-  try { savedCount = db.prepare('SELECT COUNT(*) as c FROM saved_properties').get().c; } catch {}
-  try { portfolioCount = db.prepare('SELECT COUNT(*) as c FROM portfolios').get().c; } catch {}
+  let zhviCount = 0, snapshotCount = 0, marketCacheCount = 0, savedCount = 0, portfolioCount = 0, searchCount = 0, alertCount = 0;
+  try { zhviCount = db.prepare('SELECT COUNT(*) as c FROM zhvi_data').get().c; } catch (e) {}
+  try { snapshotCount = db.prepare('SELECT COUNT(*) as c FROM listing_snapshots').get().c; } catch (e) {}
+  try { marketCacheCount = db.prepare('SELECT COUNT(*) as c FROM market_context_cache').get().c; } catch (e) {}
+  try { savedCount = db.prepare('SELECT COUNT(*) as c FROM saved_properties').get().c; } catch (e) {}
+  try { portfolioCount = db.prepare('SELECT COUNT(*) as c FROM portfolios').get().c; } catch (e) {}
+  try { searchCount = db.prepare('SELECT COUNT(*) as c FROM saved_searches').get().c; } catch (e) {}
+  try { alertCount = db.prepare('SELECT COUNT(*) as c FROM alerts WHERE read = 0').get().c; } catch (e) {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount },
     uptime: process.uptime(),
   });
 });
@@ -2177,6 +2164,178 @@ app.post('/api/investment/calculate', (req, res) => {
   }
 });
 
+// ===========================================================================
+// SAVED SEARCHES — persistent scanner filter presets
+// ===========================================================================
+
+app.get('/api/saved-searches', (req, res) => {
+  try {
+    const rows = db.prepare('SELECT * FROM saved_searches ORDER BY created_at DESC').all();
+    res.json(rows.map(r => ({ ...r, filters: JSON.parse(r.filters) })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/saved-searches', (req, res) => {
+  try {
+    const { name, filters } = req.body;
+    if (!name) return res.status(400).json({ error: 'Missing search name' });
+    if (!filters || typeof filters !== 'object') return res.status(400).json({ error: 'Missing filters' });
+    // Limit to 20 saved searches
+    const count = db.prepare('SELECT COUNT(*) as c FROM saved_searches').get().c;
+    if (count >= 20) return res.status(400).json({ error: 'Maximum 20 saved searches' });
+    const result = db.prepare('INSERT INTO saved_searches (name, filters) VALUES (?, ?)')
+      .run(name, JSON.stringify(filters));
+    res.json({ id: result.lastInsertRowid });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/saved-searches/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM saved_searches WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/saved-searches/:id/run', async (req, res) => {
+  try {
+    const search = db.prepare('SELECT * FROM saved_searches WHERE id = ?').get(req.params.id);
+    if (!search) return res.status(404).json({ error: 'Search not found' });
+    const filters = JSON.parse(search.filters);
+    const result = await fetchListings(filters);
+    db.prepare("UPDATE saved_searches SET last_run_at = datetime('now') WHERE id = ?").run(req.params.id);
+    res.json(result || { listings: [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===========================================================================
+// ALERTS — notification system for price drops, new listings, momentum changes
+// ===========================================================================
+
+app.get('/api/alerts', (req, res) => {
+  try {
+    const { unread, limit: lim } = req.query;
+    let sql = 'SELECT * FROM alerts';
+    const params = [];
+    if (unread === 'true') { sql += ' WHERE read = 0'; }
+    sql += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(parseInt(lim) || 50);
+    const rows = db.prepare(sql).all(...params);
+    res.json(rows.map(r => ({ ...r, data: JSON.parse(r.data || '{}') })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/alerts/count', (req, res) => {
+  try {
+    const row = db.prepare('SELECT COUNT(*) as count FROM alerts WHERE read = 0').get();
+    res.json({ unread: row.count });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/alerts/:id/read', (req, res) => {
+  try {
+    db.prepare('UPDATE alerts SET read = 1 WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/alerts/read-all', (req, res) => {
+  try {
+    db.prepare('UPDATE alerts SET read = 1 WHERE read = 0').run();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ===========================================================================
+// BACKGROUND ALERT SCANNER — runs every 6 hours
+// ===========================================================================
+
+let lastMomentumScan = 0;
+
+async function runAlertScanner() {
+  console.log('[AlertScanner] Starting scan...');
+  const insertAlert = db.prepare(
+    'INSERT INTO alerts (type, search_id, property_address, data) VALUES (?, ?, ?, ?)'
+  );
+
+  // 1. Re-run saved searches, diff against listing_snapshots
+  const searches = db.prepare('SELECT * FROM saved_searches').all();
+  for (const search of searches) {
+    try {
+      const filters = JSON.parse(search.filters);
+      const result = await fetchListings(filters);
+      if (!result?.listings) continue;
+
+      for (const listing of result.listings) {
+        const key = listingKey(listing);
+        const prior = db.prepare(
+          'SELECT price FROM listing_snapshots WHERE listing_key = ? ORDER BY created_at DESC LIMIT 1 OFFSET 1'
+        ).get(key);
+
+        if (!prior) {
+          // Check if this is truly new (no snapshot at all)
+          const any = db.prepare('SELECT id FROM listing_snapshots WHERE listing_key = ?').get(key);
+          if (!any) {
+            insertAlert.run('new_listing', search.id, listing.address || listing.formattedAddress, JSON.stringify({
+              price: listing.price, beds: listing.bedrooms, baths: listing.bathrooms,
+              sqft: listing.squareFootage, searchName: search.name,
+            }));
+          }
+        } else if (prior.price > listing.price) {
+          insertAlert.run('price_drop', search.id, listing.address || listing.formattedAddress, JSON.stringify({
+            oldPrice: prior.price, newPrice: listing.price,
+            drop: prior.price - listing.price,
+            dropPercent: ((prior.price - listing.price) / prior.price * 100).toFixed(1),
+            searchName: search.name,
+          }));
+        }
+      }
+      db.prepare("UPDATE saved_searches SET last_run_at = datetime('now') WHERE id = ?").run(search.id);
+    } catch (err) {
+      console.log(`[AlertScanner] Search ${search.id} failed:`, err.message);
+    }
+  }
+
+  // 2. Check saved property price changes
+  const savedProps = db.prepare('SELECT * FROM saved_properties').all();
+  for (const prop of savedProps) {
+    try {
+      const result = await lookupProperty(prop.address);
+      if (!result?.property) continue;
+      const newPrice = result.property.zestimate || result.property.price || result.valuation?.price;
+      if (newPrice && prop.current_price && newPrice !== prop.current_price) {
+        const type = newPrice < prop.current_price ? 'price_drop' : 'price_increase';
+        insertAlert.run(type, null, prop.address, JSON.stringify({
+          oldPrice: prop.current_price, newPrice,
+          change: newPrice - prop.current_price,
+          changePercent: ((newPrice - prop.current_price) / prop.current_price * 100).toFixed(1),
+        }));
+        db.prepare("UPDATE saved_properties SET current_price = ?, updated_at = datetime('now') WHERE id = ?")
+          .run(newPrice, prop.id);
+      }
+    } catch (err) { /* skip individual failures */ }
+  }
+
+  // 3. Weekly momentum re-check for saved property zips
+  const now = Date.now();
+  if (now - lastMomentumScan > 7 * 24 * 60 * 60 * 1000) {
+    lastMomentumScan = now;
+    const zips = [...new Set(savedProps.map(p => p.zip).filter(Boolean))];
+    for (const zip of zips) {
+      try {
+        const priorSnap = db.prepare(
+          'SELECT score FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1'
+        ).get(zip);
+        if (!priorSnap) continue;
+        // Note: Full momentum re-computation requires Census/WalkScore/Crime calls.
+        // For now, log that we'd check here. Full implementation when momentum
+        // compute is extracted into a reusable helper.
+      } catch (err) { /* skip */ }
+    }
+  }
+
+  console.log('[AlertScanner] Scan complete');
+}
+
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -2203,4 +2362,9 @@ app.listen(PORT, () => {
 
   // Download Zillow ZHVI data in background (non-blocking)
   downloadAndParseZHVI();
+
+  // Background alert scanner — every 6 hours
+  setInterval(() => { runAlertScanner().catch(err => console.error('[AlertScanner] Error:', err)); }, 6 * 60 * 60 * 1000);
+  // Initial scan after 5 minutes (let ZHVI + cache warm up first)
+  setTimeout(() => { runAlertScanner().catch(err => console.error('[AlertScanner] Error:', err)); }, 5 * 60 * 1000);
 });
