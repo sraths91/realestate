@@ -880,6 +880,99 @@ select { cursor: pointer; appearance: none;
   .heatmap-legend { margin-left: 0; }
   .legend-bar { width: 80px; }
 }
+/* ---------- NL Search Bar ---------- */
+.nl-search-bar {
+  display: flex; gap: 8px; align-items: center;
+  margin-bottom: 16px; padding: 0 4px;
+}
+.nl-search-bar input {
+  flex: 1; padding: 10px 14px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); color: var(--text); font-size: 0.9rem;
+}
+.nl-search-bar input:focus { border-color: var(--accent); outline: none; }
+.nl-search-bar .btn { white-space: nowrap; gap: 6px; }
+
+/* ---------- AI Verdict Modal ---------- */
+.verdict-recommendation {
+  display: inline-block; font-size: 1.4rem; font-weight: 700;
+  padding: 8px 24px; border-radius: var(--radius-sm); margin-bottom: 12px;
+}
+.verdict-recommendation.buy { background: rgba(52,211,153,0.15); color: var(--green); }
+.verdict-recommendation.hold { background: rgba(250,204,21,0.15); color: #facc15; }
+.verdict-recommendation.pass { background: rgba(248,113,113,0.15); color: var(--red); }
+.verdict-confidence { font-size: 0.85rem; color: var(--text-muted); margin-left: 8px; }
+.verdict-offer-range {
+  display: flex; gap: 16px; align-items: center; margin: 16px 0;
+  padding: 12px; background: var(--bg-card); border-radius: var(--radius-sm); border: 1px solid var(--border);
+}
+.verdict-offer-range .label { font-size: 0.8rem; color: var(--text-muted); }
+.verdict-offer-range .value { font-size: 1.1rem; font-weight: 600; }
+.verdict-section { margin: 16px 0; }
+.verdict-section h4 { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+.verdict-list { list-style: none; padding: 0; }
+.verdict-list li { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; line-height: 1.4; }
+.verdict-list li:last-child { border-bottom: none; }
+.verdict-strategy {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 8px;
+}
+.strategy-step { padding: 12px; background: var(--bg-card); border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.strategy-step .step-label { font-size: 0.75rem; font-weight: 700; color: var(--accent); text-transform: uppercase; margin-bottom: 4px; }
+.strategy-step .step-text { font-size: 0.85rem; line-height: 1.4; }
+.verdict-source { font-size: 0.75rem; color: var(--text-muted); margin-top: 16px; text-align: right; }
+
+/* ---------- Market Brief ---------- */
+.market-brief-card {
+  padding: 20px; margin-bottom: 20px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.brief-outlook {
+  display: inline-block; font-size: 1.1rem; font-weight: 700;
+  padding: 6px 18px; border-radius: var(--radius-sm); margin-bottom: 12px;
+}
+.brief-outlook.heating { background: rgba(248,113,113,0.15); color: var(--red); }
+.brief-outlook.cooling { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.brief-outlook.stable { background: rgba(148,163,184,0.15); color: var(--text-muted); }
+.brief-thesis { font-size: 1rem; font-style: italic; line-height: 1.5; margin-bottom: 16px; }
+.brief-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.brief-metric { text-align: center; padding: 10px; background: var(--bg-elevated); border-radius: var(--radius-sm); }
+.brief-metric .metric-value { font-size: 1.1rem; font-weight: 700; }
+.brief-metric .metric-label { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+.brief-property-type { padding: 12px; background: rgba(91,141,249,0.08); border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin-bottom: 12px; }
+.brief-forecast { font-size: 0.9rem; line-height: 1.5; color: var(--text-muted); }
+
+/* ---------- Portfolio AI Modal ---------- */
+.portfolio-health { text-align: center; margin-bottom: 16px; }
+.portfolio-health .score { font-size: 2.5rem; font-weight: 700; }
+.portfolio-health .score.good { color: var(--green); }
+.portfolio-health .score.fair { color: #facc15; }
+.portfolio-health .score.poor { color: var(--red); }
+.portfolio-health .label { font-size: 0.85rem; color: var(--text-muted); }
+.portfolio-section { margin: 16px 0; padding: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.portfolio-section h4 { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; }
+.portfolio-rec {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border);
+}
+.portfolio-rec:last-child { border-bottom: none; }
+.portfolio-rec .action-badge {
+  flex-shrink: 0; padding: 4px 10px; border-radius: var(--radius-sm); font-size: 0.75rem; font-weight: 700;
+}
+.portfolio-rec .action-badge.hold { background: rgba(52,211,153,0.15); color: var(--green); }
+.portfolio-rec .action-badge.sell { background: rgba(248,113,113,0.15); color: var(--red); }
+.portfolio-rec .action-badge.buy_more { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.portfolio-rec .rec-text { font-size: 0.85rem; line-height: 1.4; }
+.portfolio-rec .rec-address { font-weight: 600; margin-bottom: 2px; }
+.portfolio-buynext { padding: 12px; background: rgba(91,141,249,0.08); border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; margin-top: 12px; font-size: 0.9rem; line-height: 1.4; }
+
+/* ---------- AI Button Shared ---------- */
+.btn-ai {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; font-size: 0.8rem; font-weight: 600;
+  background: rgba(91,141,249,0.1); color: var(--accent); border: 1px solid rgba(91,141,249,0.3);
+  border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s;
+}
+.btn-ai:hover { background: rgba(91,141,249,0.2); border-color: var(--accent); }
+
 @media (max-width: 640px) {
   .header-inner { gap: 8px; padding: 0 12px; }
   .tab-btn span:not(.sr-only) { display: none; }
@@ -888,4 +981,6 @@ select { cursor: pointer; appearance: none;
   .search-hero h1 { font-size: 1.5rem; }
   .big-number { font-size: 1.8rem; }
   .scan-summary { grid-template-columns: 1fr 1fr; }
+  .verdict-strategy { grid-template-columns: 1fr; }
+  .nl-search-bar { flex-wrap: wrap; }
 }

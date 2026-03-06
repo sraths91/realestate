@@ -15,6 +15,8 @@ const RENTCAST_BASE = 'https://api.rentcast.io/v1';
 const GREATSCHOOLS_KEY = process.env.GREATSCHOOLS_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 app.use(cors());
 app.use(express.json());
@@ -174,6 +176,15 @@ db.exec(`
     FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_client_activity ON client_activity(client_id, created_at);
+
+  CREATE TABLE IF NOT EXISTS ai_cache (
+    cache_key TEXT PRIMARY KEY,
+    feature TEXT NOT NULL,
+    response_json TEXT NOT NULL,
+    source TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+  );
 `);
 
 // Extend portfolios table for client tracking (safe ALTER, ignore if already exists)
@@ -193,6 +204,10 @@ try {
 try {
   const reportsDel = db.prepare("DELETE FROM reports WHERE expires_at < datetime('now')").run();
   if (reportsDel.changes > 0) console.log(`Cleaned up ${reportsDel.changes} expired reports`);
+} catch (e) { /* ignore on first run */ }
+try {
+  const aiDel = db.prepare("DELETE FROM ai_cache WHERE expires_at < datetime('now')").run();
+  if (aiDel.changes > 0) console.log(`Cleaned up ${aiDel.changes} expired AI cache entries`);
 } catch (e) { /* ignore on first run */ }
 console.log('SQLite database initialized at', path.join(DATA_DIR, 'propscout.db'));
 
@@ -222,6 +237,130 @@ function cacheSet(key, data) {
       if (now - v.ts > CACHE_TTL) cache.delete(k);
     }
   }
+}
+
+// ===========================================================================
+// SHARED AI HELPER — Claude → OpenAI → Gemini → Groq with SQLite cache
+// ===========================================================================
+
+/** Check if daily AI request limit reached (18 of 20 RPD budget) */
+function checkAIDailyLimit() {
+  try {
+    const { cnt } = db.prepare(
+      "SELECT COUNT(*) as cnt FROM ai_cache WHERE created_at > datetime('now', '-1 day') AND source != 'template'"
+    ).get();
+    return cnt < 18;
+  } catch { return true; }
+}
+
+/**
+ * Call AI with cascading provider fallback and SQLite caching.
+ * @param {string} prompt - The full prompt text
+ * @param {Object} opts - { maxOutputTokens, cacheKey, cacheTTL, feature, jsonMode }
+ * @returns {{ source: string, text: string, cached?: boolean } | null}
+ */
+async function callAI(prompt, opts = {}) {
+  const { maxOutputTokens = 800, cacheKey, cacheTTL = '7 days', feature = 'general', jsonMode = false } = opts;
+
+  // Check SQLite cache first
+  if (cacheKey) {
+    try {
+      const cached = db.prepare(
+        "SELECT response_json, source FROM ai_cache WHERE cache_key = ? AND expires_at > datetime('now')"
+      ).get(cacheKey);
+      if (cached) {
+        return { source: cached.source, text: cached.response_json, cached: true };
+      }
+    } catch { /* cache miss */ }
+  }
+
+  // Check daily limit
+  if (!checkAIDailyLimit()) {
+    console.log('[AI] Daily limit reached (18/20), skipping API call');
+    return null;
+  }
+
+  let result = null;
+
+  // 1. Claude
+  if (!result && ANTHROPIC_API_KEY) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: maxOutputTokens, messages: [{ role: 'user', content: prompt }] }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.content?.[0]?.text || '';
+        if (text) result = { source: 'claude', text };
+      }
+    } catch (err) { console.log('[AI] Claude error:', err.message); }
+  }
+
+  // 2. OpenAI
+  if (!result && OPENAI_API_KEY) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({ model: 'gpt-4o-mini', max_tokens: maxOutputTokens, messages: [{ role: 'user', content: prompt }] }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content || '';
+        if (text) result = { source: 'openai', text };
+      }
+    } catch (err) { console.log('[AI] OpenAI error:', err.message); }
+  }
+
+  // 3. Gemini (free tier)
+  if (!result && GEMINI_API_KEY) {
+    try {
+      const genConfig = { maxOutputTokens };
+      if (jsonMode) genConfig.responseMimeType = 'application/json';
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: genConfig }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (text) result = { source: 'gemini', text };
+        else console.log('[AI] Gemini: empty text, finishReason:', data.candidates?.[0]?.finishReason);
+      } else {
+        console.log('[AI] Gemini HTTP', res.status, await res.text().then(t => t.substring(0, 200)));
+      }
+    } catch (err) { console.log('[AI] Gemini error:', err.message); }
+  }
+
+  // 4. Groq (free tier)
+  if (!result && GROQ_API_KEY) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+        body: JSON.stringify({ model: 'llama-3.3-70b-versatile', max_tokens: maxOutputTokens, messages: [{ role: 'user', content: prompt }] }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content || '';
+        if (text) result = { source: 'groq', text };
+      }
+    } catch (err) { console.log('[AI] Groq error:', err.message); }
+  }
+
+  // Save to SQLite cache
+  if (result && cacheKey) {
+    try {
+      db.prepare(
+        "INSERT OR REPLACE INTO ai_cache (cache_key, feature, response_json, source, expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))"
+      ).run(cacheKey, feature, result.text, result.source, '+' + cacheTTL);
+    } catch { /* ignore cache write errors */ }
+  }
+
+  return result;
 }
 
 // ===========================================================================
@@ -2001,12 +2140,14 @@ app.get('/api/health', (req, res) => {
   try { reportCount = db.prepare('SELECT COUNT(*) as c FROM reports').get().c; } catch (e) {}
   let clientCount = 0;
   try { clientCount = db.prepare('SELECT COUNT(*) as c FROM clients').get().c; } catch (e) {}
+  let aiCacheCount = 0;
+  try { aiCacheCount = db.prepare('SELECT COUNT(*) as c FROM ai_cache').get().c; } catch (e) {}
 
   res.json({
     status: 'ok',
     sources,
     cache: { entries: cache.size },
-    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount, reports: reportCount, clients: clientCount },
+    database: { zhviZips: zhviCount, listingSnapshots: snapshotCount, marketContextZips: marketCacheCount, savedProperties: savedCount, portfolios: portfolioCount, savedSearches: searchCount, unreadAlerts: alertCount, reports: reportCount, clients: clientCount, aiCache: aiCacheCount },
     uptime: process.uptime(),
   });
 });
@@ -2662,7 +2803,7 @@ app.post('/api/agent/profile', (req, res) => {
 });
 
 // ===========================================================================
-// AI NARRATIVE — Claude → OpenAI → template fallback
+// AI NARRATIVE — uses shared callAI() with template fallback
 // ===========================================================================
 async function generateNarrative(propertyData, marketData, momentumData) {
   const prompt = `You are a real estate analyst writing a brief property report summary. Be concise (3-4 sentences).
@@ -2676,52 +2817,8 @@ ${marketData ? `Market Context: Median home value $${marketData.medianValue ? Nu
 
 Write a professional summary highlighting investment potential, market position, and key factors.`;
 
-  // Try Claude API first
-  if (ANTHROPIC_API_KEY) {
-    try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 500,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return { source: 'claude', text: data.content?.[0]?.text || '' };
-      }
-    } catch (err) { console.log('[AI] Claude API error:', err.message); }
-  }
-
-  // Try OpenAI fallback
-  if (OPENAI_API_KEY) {
-    try {
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          max_tokens: 500,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return { source: 'openai', text: data.choices?.[0]?.message?.content || '' };
-      }
-    } catch (err) { console.log('[AI] OpenAI API error:', err.message); }
-  }
-
-  // Template fallback
+  const result = await callAI(prompt, { maxOutputTokens: 500, feature: 'narrative' });
+  if (result) return result;
   return { source: 'template', text: templateNarrative(propertyData, marketData, momentumData) };
 }
 
@@ -2861,6 +2958,404 @@ app.get('/api/reports/:id', (req, res) => {
   }
 });
 
+// ===========================================================================
+// AI ANALYTICS — Verdict, Market Brief, NL Search, Portfolio Advisor
+// ===========================================================================
+
+// --- Natural Language Search ---
+function regexParseSearch(query) {
+  const q = query.toLowerCase();
+  const filters = { city: null, state: null, zipCode: null, minPrice: null, maxPrice: null, beds: null, baths: null, propertyType: null };
+
+  const zipMatch = q.match(/\b(\d{5})\b/);
+  if (zipMatch) filters.zipCode = zipMatch[1];
+
+  const bedMatch = q.match(/(\d)\s*(?:bed|br|bedroom)/);
+  if (bedMatch) filters.beds = bedMatch[1];
+
+  const bathMatch = q.match(/(\d)\s*(?:bath|ba)\b/);
+  if (bathMatch) filters.baths = bathMatch[1];
+
+  const underMatch = q.match(/(?:under|below|max|less than|up to)\s*\$?(\d+)\s*(k|K)?/);
+  if (underMatch) filters.maxPrice = parseFloat(underMatch[1]) * (underMatch[2] ? 1000 : 1);
+
+  const overMatch = q.match(/(?:over|above|min|at least|more than)\s*\$?(\d+)\s*(k|K)?/);
+  if (overMatch) filters.minPrice = parseFloat(overMatch[1]) * (overMatch[2] ? 1000 : 1);
+
+  const rangeMatch = q.match(/\$?(\d+)\s*(k|K)?\s*[-–to]+\s*\$?(\d+)\s*(k|K)?/);
+  if (rangeMatch) {
+    filters.minPrice = parseFloat(rangeMatch[1]) * (rangeMatch[2] ? 1000 : 1);
+    filters.maxPrice = parseFloat(rangeMatch[3]) * (rangeMatch[4] ? 1000 : 1);
+  }
+
+  if (q.includes('condo')) filters.propertyType = 'Condo';
+  else if (q.includes('townhouse') || q.includes('town house')) filters.propertyType = 'Townhouse';
+  else if (q.includes('multi') || q.includes('duplex')) filters.propertyType = 'Multi-Family';
+
+  // City: "in Austin TX" or "in San Francisco"
+  const inMatch = q.match(/\bin\s+([a-z][a-z\s]+?)(?:\s+(?:near|under|below|above|over|with|for|around|[a-z]{2}\b|\d|$))/);
+  if (inMatch) filters.city = inMatch[1].trim().replace(/\b\w/g, c => c.toUpperCase());
+
+  // State: 2-letter code (skip "in"/"or"/"me" if they appear as preposition/conjunction before city)
+  const stateAbbrs = 'al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|ia|ks|ky|la|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy';
+  const stateMatch = q.match(new RegExp(`(?:^|\\s)(${stateAbbrs})(?:\\s|$|\\b(?!\\w))`));
+  if (stateMatch) filters.state = stateMatch[1].toUpperCase();
+  // Also check: "in" followed by a city means it's a preposition, check for "me"/"or" similarly
+  if (!filters.state) {
+    const ambigStates = q.match(/\b(in|or|me)\b/g);
+    if (ambigStates && !filters.city) {
+      const last = ambigStates[ambigStates.length - 1];
+      filters.state = last.toUpperCase();
+    }
+  }
+
+  return filters;
+}
+
+function buildSearchInterpretation(f) {
+  const parts = [];
+  if (f.beds) parts.push(`${f.beds}+ bed`);
+  if (f.baths) parts.push(`${f.baths}+ bath`);
+  if (f.propertyType) parts.push(f.propertyType);
+  parts.push('homes');
+  if (f.minPrice && f.maxPrice) parts.push(`$${(f.minPrice/1000).toFixed(0)}K-$${(f.maxPrice/1000).toFixed(0)}K`);
+  else if (f.maxPrice) parts.push(`under $${(f.maxPrice/1000).toFixed(0)}K`);
+  else if (f.minPrice) parts.push(`over $${(f.minPrice/1000).toFixed(0)}K`);
+  if (f.city) parts.push(`in ${f.city}`);
+  if (f.state) parts.push(f.state);
+  if (f.zipCode) parts.push(`(${f.zipCode})`);
+  return parts.join(' ');
+}
+
+app.post('/api/ai/parse-search', async (req, res) => {
+  try {
+    const { query } = req.body;
+    if (!query || query.trim().length < 3) return res.status(400).json({ error: 'query too short' });
+
+    const normalized = query.toLowerCase().trim();
+    const cacheKey = `nl_search:${crypto.createHash('md5').update(normalized).digest('hex')}`;
+
+    const prompt = `Parse this real estate search query into structured filters. Return ONLY valid JSON, no other text.
+
+Query: "${query}"
+
+Return: {"city":STRING_OR_NULL,"state":STRING_OR_NULL_TWO_LETTER,"zipCode":STRING_OR_NULL_5_DIGIT,"minPrice":NUMBER_OR_NULL,"maxPrice":NUMBER_OR_NULL,"beds":STRING_OR_NULL,"baths":STRING_OR_NULL,"propertyType":STRING_OR_NULL}
+
+Rules:
+- "under 400k" = maxPrice:400000. "400-500k" = minPrice:400000,maxPrice:500000
+- State: always 2-letter abbreviation. Infer from city if possible.
+- beds/baths: just the number as string ("3", "2")
+- propertyType: one of "Single Family", "Condo", "Townhouse", "Multi-Family" or null
+- "near schools" or "good schools" = ignore (not a filter)
+- "cheap" = maxPrice:300000, "luxury" = minPrice:750000`;
+
+    const aiResult = await callAI(prompt, { cacheKey, cacheTTL: '1 day', feature: 'nl_search', maxOutputTokens: 1024, jsonMode: true });
+
+    if (aiResult) {
+      try {
+        const filters = JSON.parse(aiResult.text);
+        return res.json({ filters, interpreted: buildSearchInterpretation(filters), source: aiResult.source, cached: !!aiResult.cached });
+      } catch { /* AI returned bad JSON, fall through to regex */ }
+    }
+
+    const filters = regexParseSearch(query);
+    res.json({ filters, interpreted: buildSearchInterpretation(filters), source: 'regex', cached: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- AI Property Verdict ---
+function buildVerdictTemplate(saved, momentum, zhvi, investment) {
+  const price = saved?.current_price || saved?.saved_price || 0;
+  const capRate = investment?.capRate || 0;
+  const momScore = momentum?.score ?? 50;
+
+  let recommendation = 'HOLD';
+  if (capRate > 5 && momScore > 55) recommendation = 'BUY';
+  else if (capRate < 3 || momScore < 30) recommendation = 'PASS';
+
+  const confidence = (momentum && zhvi && investment) ? 'MEDIUM' : 'LOW';
+  const low = Math.round(price * 0.93);
+  const high = Math.round(price * 1.02);
+
+  const risks = [];
+  if (capRate < 4) risks.push('Cap rate below 4% indicates tight cash flow margins');
+  if (momScore < 45) risks.push(`Neighborhood momentum is weak (${momScore}/100)`);
+  if (zhvi?.yoy_change < 0) risks.push(`Home values declining ${zhvi.yoy_change.toFixed(1)}% year-over-year`);
+  if (risks.length === 0) risks.push('Market conditions may shift with interest rate changes');
+  while (risks.length < 3) risks.push('Conduct thorough property inspection before committing');
+
+  const opps = [];
+  if (capRate > 5) opps.push(`Strong ${capRate.toFixed(1)}% cap rate for positive cash flow`);
+  if (momScore > 60) opps.push(`Rising neighborhood momentum (${momScore}/100) signals appreciation`);
+  if (zhvi?.yoy_change > 3) opps.push(`Strong ${zhvi.yoy_change.toFixed(1)}% YoY appreciation trend`);
+  if (opps.length === 0) opps.push('Stable market conditions for long-term hold strategy');
+  while (opps.length < 3) opps.push('Potential for rent increases in growing market');
+
+  return {
+    recommendation, confidence,
+    offerRange: { low, high },
+    risks: risks.slice(0, 3),
+    opportunities: opps.slice(0, 3),
+    strategy: {
+      day30: recommendation === 'BUY' ? `Submit offer at $${low.toLocaleString()} with standard contingencies` : 'Continue monitoring the property and gathering market data',
+      day60: recommendation === 'BUY' ? `Negotiate within $${low.toLocaleString()}-$${high.toLocaleString()} range, request seller concessions if above midpoint` : 'Compare with alternative properties in the area for better value',
+      day90: recommendation === 'BUY' ? 'Finalize financing and schedule inspections, plan renovation if applicable' : 'Re-evaluate based on updated market conditions and momentum changes',
+    },
+  };
+}
+
+app.post('/api/ai/verdict', async (req, res) => {
+  try {
+    const { address, savedPropertyId } = req.body;
+    if (!address) return res.status(400).json({ error: 'address required' });
+
+    const cacheKey = `verdict:${address.toLowerCase().trim()}`;
+
+    // Gather saved property data
+    let saved = null;
+    if (savedPropertyId) {
+      saved = db.prepare('SELECT * FROM saved_properties WHERE id = ?').get(savedPropertyId);
+    }
+    if (!saved) {
+      saved = db.prepare('SELECT * FROM saved_properties WHERE address = ?').get(address);
+    }
+
+    const zip = saved?.zip || '';
+    const price = saved?.current_price || saved?.saved_price || 0;
+    const rent = saved?.rent_estimate || 0;
+
+    // Fetch momentum, ZHVI, market context
+    let momentum = null, zhvi = null, market = null;
+    if (zip) {
+      try { momentum = db.prepare('SELECT score, trend, factors FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1').get(zip); } catch {}
+      zhvi = getZHVIData(zip);
+      market = getMarketContext(zip);
+    }
+
+    // Calculate investment metrics
+    const noi = rent * 12 * 0.6;
+    const capRate = price > 0 ? (noi / price * 100) : 0;
+    const monthlyMortgage = price > 0 ? (price * 0.8) * (0.07 / 12) / (1 - Math.pow(1 + 0.07 / 12, -360)) : 0;
+    const monthlyCashFlow = rent - monthlyMortgage - (rent * 0.4);
+    const dscr = monthlyMortgage > 0 ? (noi / (monthlyMortgage * 12)) : 0;
+    const investment = { capRate: +capRate.toFixed(1), monthlyCashFlow: Math.round(monthlyCashFlow), dscr: +dscr.toFixed(2) };
+
+    // Build AI prompt
+    const prompt = `You are a real estate investment analyst. Analyze this property and return ONLY valid JSON.
+
+Property: ${address}
+Price: $${price || 'unknown'}
+Rent Estimate: $${rent || 'unknown'}/mo
+${momentum ? `Momentum Score: ${momentum.score}/100, trend: ${momentum.trend}` : 'No momentum data'}
+${zhvi ? `ZHVI: $${Math.round(zhvi.current_value / 1000)}K, YoY: ${zhvi.yoy_change?.toFixed(1)}%` : 'No ZHVI data'}
+${investment.capRate ? `Cap Rate: ${investment.capRate}%, DSCR: ${investment.dscr}, Cash Flow: $${investment.monthlyCashFlow}/mo` : ''}
+${market ? `Market: Median $${market.medianPrice}, DOM: ${market.medianDom}d, Inventory: ${market.totalInventory}` : ''}
+
+Return this exact JSON:
+{"recommendation":"BUY or HOLD or PASS","confidence":"HIGH or MEDIUM or LOW","offerRange":{"low":NUMBER,"high":NUMBER},"risks":["risk1","risk2","risk3"],"opportunities":["opp1","opp2","opp3"],"strategy":{"day30":"action","day60":"action","day90":"action"}}`;
+
+    const aiResult = await callAI(prompt, { cacheKey, cacheTTL: '7 days', feature: 'verdict', maxOutputTokens: 2048, jsonMode: true });
+
+    if (aiResult) {
+      try {
+        const verdict = JSON.parse(aiResult.text);
+        return res.json({ verdict, source: aiResult.source, cached: !!aiResult.cached });
+      } catch { /* bad JSON, fall through */ }
+    }
+
+    const verdict = buildVerdictTemplate(saved, momentum, zhvi, investment);
+    res.json({ verdict, source: 'template', cached: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- AI Market Brief ---
+function buildMarketBriefTemplate(momentum, zhvi, market) {
+  const momScore = momentum?.score ?? 50;
+  const yoy = zhvi?.yoy_change ?? 0;
+
+  let outlook = 'STABLE';
+  if (momScore > 60 && yoy > 3) outlook = 'HEATING';
+  else if (momScore < 35 || yoy < -2) outlook = 'COOLING';
+
+  const factors = momentum?.factors ? JSON.parse(momentum.factors) : [];
+  const topDriver = factors[0]?.name || 'market conditions';
+
+  return {
+    outlook,
+    thesis: outlook === 'HEATING'
+      ? `Strong ${topDriver.toLowerCase()} driving appreciation. Market fundamentals support continued growth.`
+      : outlook === 'COOLING'
+        ? `Weakening ${topDriver.toLowerCase()} signals caution. Consider waiting for better entry points.`
+        : `Balanced market conditions with steady ${topDriver.toLowerCase()}. Good for long-term holds.`,
+    keyMetrics: {
+      medianHomeValue: zhvi ? `$${Math.round(zhvi.current_value / 1000)}K` : 'N/A',
+      yoyAppreciation: zhvi ? `${yoy > 0 ? '+' : ''}${yoy.toFixed(1)}%` : 'N/A',
+      inventory: market?.totalInventory ? String(market.totalInventory) : 'N/A',
+      avgDOM: market?.medianDom ? `${market.medianDom} days` : 'N/A',
+      momentumScore: `${momScore}/100`,
+    },
+    bestPropertyType: momScore > 60 ? 'Single-family homes with rental potential for dual income strategy' : 'Value-add properties below median price for maximum upside',
+    forecast: outlook === 'HEATING'
+      ? 'Expect continued appreciation with increasing competition. Act quickly on underpriced listings.'
+      : outlook === 'COOLING'
+        ? 'Prices may soften 2-5% over 6 months. Negotiate aggressively and target motivated sellers.'
+        : 'Steady conditions expected. Focus on cash-flow positive deals rather than speculative appreciation.',
+  };
+}
+
+app.post('/api/ai/market-brief', async (req, res) => {
+  try {
+    const { zipCode } = req.body;
+    if (!zipCode) return res.status(400).json({ error: 'zipCode required' });
+
+    const cacheKey = `market_brief:${zipCode}`;
+
+    // Gather data
+    let momentum = null;
+    try { momentum = db.prepare('SELECT score, trend, factors FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1').get(zipCode); } catch {}
+    const zhvi = getZHVIData(zipCode);
+    const market = getMarketContext(zipCode);
+
+    const prompt = `You are a real estate market analyst. Provide a market brief for zip code ${zipCode}. Return ONLY valid JSON.
+
+Data:
+${zhvi ? `ZHVI: $${Math.round(zhvi.current_value / 1000)}K, YoY: ${zhvi.yoy_change?.toFixed(1)}%` : 'No ZHVI data'}
+${momentum ? `Momentum Score: ${momentum.score}/100, Trend: ${momentum.trend}` : 'No momentum data'}
+${momentum?.factors ? `Factors: ${momentum.factors}` : ''}
+${market ? `Market: DOM ${market.medianDom}d, Inventory ${market.totalInventory}, Median $${market.medianPrice}` : 'No market data'}
+
+Return this JSON:
+{"outlook":"HEATING or COOLING or STABLE","thesis":"2-3 sentences on market direction","keyMetrics":{"medianHomeValue":"$NNK","yoyAppreciation":"+N.N%","inventory":"NNN","avgDOM":"NN days","momentumScore":"NN/100"},"bestPropertyType":"recommendation","forecast":"2-3 sentences on 6-month outlook"}`;
+
+    const aiResult = await callAI(prompt, { cacheKey, cacheTTL: '3 days', feature: 'market_brief', maxOutputTokens: 2048, jsonMode: true });
+
+    if (aiResult) {
+      try {
+        const brief = JSON.parse(aiResult.text);
+        return res.json({ brief, source: aiResult.source, cached: !!aiResult.cached });
+      } catch { /* bad JSON, fall through */ }
+    }
+
+    const brief = buildMarketBriefTemplate(momentum, zhvi, market);
+    res.json({ brief, source: 'template', cached: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- AI Portfolio Advisor ---
+function buildPortfolioTemplate(properties) {
+  const zips = [...new Set(properties.map(p => p.zip).filter(Boolean))];
+  const avgCap = properties.reduce((s, p) => s + (p.capRate || 0), 0) / properties.length;
+  const avgMom = properties.filter(p => p.momentum != null).reduce((s, p) => s + p.momentum, 0) / (properties.filter(p => p.momentum != null).length || 1);
+  const negCashFlow = properties.filter(p => p.monthlyCashFlow < 0);
+
+  const healthScore = Math.round(Math.min(100, (avgCap / 8 * 40) + (avgMom / 100 * 30) + (Math.min(zips.length, 3) / 3 * 30)));
+
+  const diversification = zips.length >= 3
+    ? `Good geographic spread across ${zips.length} zip codes.`
+    : zips.length === 1
+      ? `All properties concentrated in zip ${zips[0]}. Consider diversifying into adjacent areas.`
+      : `Limited spread across ${zips.length} zip codes. Adding a third market would reduce risk.`;
+
+  const riskExposure = negCashFlow.length > 0
+    ? `${negCashFlow.length} of ${properties.length} properties have negative cash flow. Portfolio average cap rate: ${avgCap.toFixed(1)}%.`
+    : `All properties cash-flow positive. Portfolio average cap rate: ${avgCap.toFixed(1)}%.`;
+
+  const recommendations = properties.map(p => {
+    let action = 'HOLD';
+    let reason = 'Stable asset — continue monitoring.';
+    if ((p.capRate || 0) > 5 && (p.momentum || 50) > 50) {
+      action = 'HOLD';
+      reason = `Strong ${p.capRate?.toFixed(1)}% cap rate with positive momentum (${p.momentum}/100).`;
+    } else if ((p.capRate || 0) < 2 || (p.momentum || 50) < 30) {
+      action = 'SELL';
+      reason = `Weak fundamentals — ${p.capRate?.toFixed(1)}% cap rate, momentum ${p.momentum ?? 'unknown'}/100. Capital may be better deployed elsewhere.`;
+    }
+    return { address: p.address, action, reason };
+  });
+
+  return {
+    healthScore,
+    diversification,
+    riskExposure,
+    recommendations,
+    buyNext: zips.length < 3
+      ? 'Expand into a new zip code to improve geographic diversification and reduce single-market risk.'
+      : 'Look for high-momentum areas with cap rates above 5% to strengthen overall portfolio returns.',
+  };
+}
+
+app.post('/api/ai/portfolio-advisor', async (req, res) => {
+  try {
+    const { propertyIds } = req.body;
+
+    let properties;
+    if (propertyIds?.length) {
+      const placeholders = propertyIds.map(() => '?').join(',');
+      properties = db.prepare(`SELECT * FROM saved_properties WHERE id IN (${placeholders})`).all(...propertyIds);
+    } else {
+      properties = db.prepare('SELECT * FROM saved_properties ORDER BY created_at').all();
+    }
+
+    if (properties.length < 2) return res.status(400).json({ error: 'Need at least 2 saved properties for portfolio analysis' });
+
+    // Enrich each property
+    const enriched = properties.map(p => {
+      const zip = p.zip || '';
+      let momentum = null;
+      try { momentum = db.prepare('SELECT score FROM momentum_snapshots WHERE zip = ? ORDER BY created_at DESC LIMIT 1').get(zip); } catch {}
+
+      const price = p.current_price || p.saved_price || 0;
+      const rent = p.rent_estimate || 0;
+      const noi = rent * 12 * 0.6;
+      const capRate = price > 0 ? +(noi / price * 100).toFixed(1) : 0;
+      const monthlyMortgage = price > 0 ? (price * 0.8) * (0.07 / 12) / (1 - Math.pow(1 + 0.07 / 12, -360)) : 0;
+      const monthlyCashFlow = Math.round(rent - monthlyMortgage - (rent * 0.4));
+      const zhvi = zip ? getZHVIData(zip) : null;
+
+      return {
+        address: p.address, zip, price, rent, capRate,
+        monthlyCashFlow, momentum: momentum?.score ?? null,
+        yoy: zhvi?.yoy_change ?? null,
+      };
+    });
+
+    const addrKey = enriched.map(p => p.address).sort().join('|');
+    const cacheKey = `portfolio_advisor:${crypto.createHash('md5').update(addrKey).digest('hex')}`;
+
+    const propLines = enriched.map((p, i) =>
+      `${i + 1}. ${p.address} | ZIP: ${p.zip} | Price: $${p.price} | Rent: $${p.rent}/mo | Cap: ${p.capRate}% | Cash Flow: $${p.monthlyCashFlow}/mo | Momentum: ${p.momentum ?? 'N/A'}/100 | YoY: ${p.yoy != null ? p.yoy.toFixed(1) + '%' : 'N/A'}`
+    ).join('\n');
+
+    const prompt = `You are a real estate portfolio analyst. Analyze this investment portfolio and return ONLY valid JSON.
+
+Portfolio (${enriched.length} properties):
+${propLines}
+
+Return this JSON:
+{"healthScore":NUMBER_0_100,"diversification":"text about geographic and type diversity","riskExposure":"text about key risk factors","recommendations":[{"address":"exact address from above","action":"HOLD or SELL or BUY_MORE","reason":"1-2 sentences"}],"buyNext":"what to acquire next to strengthen the portfolio"}`;
+
+    const aiResult = await callAI(prompt, { cacheKey, cacheTTL: '3 days', feature: 'portfolio_advisor', maxOutputTokens: 2048, jsonMode: true });
+
+    if (aiResult) {
+      try {
+        const analysis = JSON.parse(aiResult.text);
+        return res.json({ analysis, source: aiResult.source, cached: !!aiResult.cached });
+      } catch { /* bad JSON, fall through */ }
+    }
+
+    const analysis = buildPortfolioTemplate(enriched);
+    res.json({ analysis, source: 'template', cached: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -2884,7 +3379,9 @@ app.listen(PORT, () => {
   if (GREATSCHOOLS_KEY) console.log('  GreatSchools: ACTIVE');
   if (ANTHROPIC_API_KEY) console.log('  AI Narrative (Claude): ACTIVE');
   else if (OPENAI_API_KEY) console.log('  AI Narrative (OpenAI): ACTIVE');
-  else console.log('  AI Narrative: template fallback (add ANTHROPIC_API_KEY or OPENAI_API_KEY)');
+  else if (GEMINI_API_KEY) console.log('  AI Narrative (Gemini Free): ACTIVE');
+  else if (GROQ_API_KEY) console.log('  AI Narrative (Groq Free): ACTIVE');
+  else console.log('  AI Narrative: template fallback (add GROQ_API_KEY for free AI)');
   console.log(`  SQLite: ${path.join(DATA_DIR, 'propscout.db')}`);
   console.log('  Cache: 24-hour TTL\n');
 

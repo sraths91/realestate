@@ -44,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initAgentSettings();
   initCompare();
   initClients();
+  initAIAnalytics();
   checkApiStatus();
 });
 
@@ -528,6 +529,15 @@ function renderSearchResults(property, valuation) {
   saveBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="${isSaved ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>${isSaved ? 'Saved' : 'Save'}`;
   saveBtn.addEventListener('click', () => toggleSaveProperty(property, valuation));
   $('property-card').querySelector('.card-header').appendChild(saveBtn);
+
+  // AI Verdict button
+  const existingVerdictBtn = document.querySelector('#property-card .btn-ai');
+  if (existingVerdictBtn) existingVerdictBtn.remove();
+  const verdictBtn = document.createElement('button');
+  verdictBtn.className = 'btn-ai';
+  verdictBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg> AI Verdict';
+  verdictBtn.addEventListener('click', () => requestAIVerdict(addr));
+  $('property-card').querySelector('.card-header').appendChild(verdictBtn);
 
   // Comparables
   const compsGrid = $('comps-grid');
@@ -1508,6 +1518,11 @@ async function performMomentum(zipCode, stateAbbr) {
     hide('momentum-loading');
     show('momentum-results');
 
+    // Show Market Brief button and store zip for it
+    state.lastMomentumZip = zipCode;
+    const briefBtn = $('market-brief-btn');
+    if (briefBtn) briefBtn.classList.remove('hidden');
+
     const demoNote = data.demo ? ' (demo data)' : '';
     toast(`Momentum score for ${zipCode}${demoNote}`, 'success');
   } catch (err) {
@@ -1888,8 +1903,13 @@ function renderSavedDrawer() {
         ${avgCap ? `<div><span style="color:var(--text-muted)">Avg Cap Rate:</span> <strong>${avgCap.toFixed(1)}%</strong></div>` : ''}
         <div style="grid-column:span 2"><span style="color:var(--text-muted)">Zip Codes:</span> ${zips.join(', ') || 'N/A'}</div>
       </div>
+      <button class="btn-ai" style="margin-top:12px;width:100%;justify-content:center" id="portfolio-ai-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg>
+        Portfolio AI Advisor
+      </button>
     `;
     list.appendChild(summary);
+    summary.querySelector('#portfolio-ai-btn').addEventListener('click', requestPortfolioAdvisor);
   }
 
   state.savedProperties.forEach((saved, i) => {
@@ -1928,6 +1948,7 @@ function renderSavedDrawer() {
       <div class="sp-actions">
         <button class="sp-calc-btn" data-idx="${i}" title="Investment Calculator">Calculator</button>
         ${saved.id ? `<button class="sp-report-btn" data-id="${saved.id}" title="Generate PDF Report">Report</button>` : ''}
+        <button class="btn-ai sp-verdict-btn" data-address="${saved.address}" data-id="${saved.id || ''}" title="AI Property Verdict">AI Verdict</button>
       </div>
     `;
     list.appendChild(el);
@@ -1960,6 +1981,13 @@ function renderSavedDrawer() {
   list.querySelectorAll('.sp-report-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       generatePropertyReport(e.target.dataset.id);
+    });
+  });
+
+  // AI Verdict buttons
+  list.querySelectorAll('.sp-verdict-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      requestAIVerdict(e.target.dataset.address, e.target.dataset.id || null);
     });
   });
 }
@@ -2759,4 +2787,257 @@ async function deleteClient(id) {
     renderClients();
     toast('Client removed', 'success');
   } catch { toast('Failed to delete client', 'error'); }
+}
+
+// ===========================================================================
+// AI ANALYTICS — NL Search, Verdict, Market Brief, Portfolio Advisor
+// ===========================================================================
+
+function initAIAnalytics() {
+  // NL Search
+  const nlBtn = $('nl-search-btn');
+  const nlInput = $('nl-search-input');
+  if (nlBtn) nlBtn.addEventListener('click', performNLSearch);
+  if (nlInput) nlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') performNLSearch(); });
+
+  // Market Brief
+  const briefBtn = $('market-brief-btn');
+  if (briefBtn) briefBtn.addEventListener('click', requestMarketBrief);
+
+  // Verdict modal close
+  const verdictClose = $('verdict-close');
+  if (verdictClose) verdictClose.addEventListener('click', () => hide('verdict-modal'));
+  const verdictModal = $('verdict-modal');
+  if (verdictModal) verdictModal.addEventListener('click', (e) => { if (e.target === verdictModal) hide('verdict-modal'); });
+
+  // Portfolio AI modal close
+  const portfolioClose = $('portfolio-ai-close');
+  if (portfolioClose) portfolioClose.addEventListener('click', () => hide('portfolio-ai-modal'));
+  const portfolioModal = $('portfolio-ai-modal');
+  if (portfolioModal) portfolioModal.addEventListener('click', (e) => { if (e.target === portfolioModal) hide('portfolio-ai-modal'); });
+}
+
+// --- Natural Language Search ---
+async function performNLSearch() {
+  const input = $('nl-search-input');
+  const query = input?.value?.trim();
+  if (!query) { toast('Type a search query', 'error'); return; }
+
+  toast('Parsing search...', 'info');
+  try {
+    const res = await fetch('/api/ai/parse-search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const data = await res.json();
+    if (data.error) { toast(data.error, 'error'); return; }
+
+    const f = data.filters;
+    if (f.city) $('scan-city').value = f.city;
+    if (f.state) $('scan-state').value = f.state;
+    if (f.zipCode) $('scan-zip').value = f.zipCode;
+    if (f.minPrice) $('scan-price-min').value = f.minPrice;
+    if (f.maxPrice) $('scan-price-max').value = f.maxPrice;
+
+    // Set bed/bath toggles
+    if (f.beds) setToggleActive('scan-beds-group', f.beds);
+    if (f.baths) setToggleActive('scan-baths-group', f.baths);
+
+    toast(`Parsed: ${data.interpreted} (${data.source})`, 'success');
+
+    // Auto-trigger scan
+    const scanBtn = $('scan-btn');
+    if (scanBtn) scanBtn.click();
+  } catch (err) {
+    toast('Failed to parse search', 'error');
+  }
+}
+
+function setToggleActive(groupId, val) {
+  const group = $(groupId);
+  if (!group) return;
+  group.querySelectorAll('.btn-toggle').forEach(b => {
+    b.classList.remove('active');
+    if (b.dataset.val === val || b.textContent.trim() === val) b.classList.add('active');
+  });
+}
+
+// --- AI Property Verdict ---
+async function requestAIVerdict(address, savedPropertyId) {
+  if (!address) { toast('No address provided', 'error'); return; }
+
+  $('verdict-body').innerHTML = '<p class="text-muted">Loading AI analysis...</p>';
+  show('verdict-modal');
+
+  try {
+    const body = { address };
+    if (savedPropertyId) body.savedPropertyId = parseInt(savedPropertyId);
+
+    const res = await fetch('/api/ai/verdict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.error) { $('verdict-body').innerHTML = `<p style="color:var(--red)">${data.error}</p>`; return; }
+
+    renderVerdictModal(data.verdict, data.source, data.cached, address);
+  } catch (err) {
+    $('verdict-body').innerHTML = `<p style="color:var(--red)">Failed to get verdict: ${err.message}</p>`;
+  }
+}
+
+function renderVerdictModal(v, source, cached, address) {
+  const rec = (v.recommendation || 'HOLD').toUpperCase();
+  const recClass = rec === 'BUY' ? 'buy' : rec === 'PASS' ? 'pass' : 'hold';
+  const confidence = v.confidence || 'MEDIUM';
+
+  const offerHtml = v.offerRange ? `
+    <div class="verdict-offer-range">
+      <div><div class="label">Low Offer</div><div class="value">$${Number(v.offerRange.low).toLocaleString()}</div></div>
+      <div style="color:var(--text-muted)">—</div>
+      <div><div class="label">High Offer</div><div class="value">$${Number(v.offerRange.high).toLocaleString()}</div></div>
+    </div>` : '';
+
+  const risksHtml = (v.risks || []).map(r => `<li>${r}</li>`).join('');
+  const oppsHtml = (v.opportunities || []).map(o => `<li>${o}</li>`).join('');
+
+  const stratHtml = v.strategy ? `
+    <div class="verdict-strategy">
+      <div class="strategy-step"><div class="step-label">30 Days</div><div class="step-text">${v.strategy.day30 || ''}</div></div>
+      <div class="strategy-step"><div class="step-label">60 Days</div><div class="step-text">${v.strategy.day60 || ''}</div></div>
+      <div class="strategy-step"><div class="step-label">90 Days</div><div class="step-text">${v.strategy.day90 || ''}</div></div>
+    </div>` : '';
+
+  $('verdict-body').innerHTML = `
+    <div style="margin-bottom:8px;font-size:0.85rem;color:var(--text-muted)">${address}</div>
+    <span class="verdict-recommendation ${recClass}">${rec}</span>
+    <span class="verdict-confidence">Confidence: ${confidence}</span>
+    ${offerHtml}
+    <div class="verdict-section">
+      <h4>Risks</h4>
+      <ul class="verdict-list">${risksHtml || '<li>No risks identified</li>'}</ul>
+    </div>
+    <div class="verdict-section">
+      <h4>Opportunities</h4>
+      <ul class="verdict-list">${oppsHtml || '<li>No opportunities identified</li>'}</ul>
+    </div>
+    <div class="verdict-section">
+      <h4>Strategy</h4>
+      ${stratHtml}
+    </div>
+    <div class="verdict-source">Source: ${source}${cached ? ' (cached)' : ''}</div>
+  `;
+}
+
+// --- AI Market Brief ---
+async function requestMarketBrief() {
+  const zip = state.lastMomentumZip;
+  if (!zip) { toast('Run momentum analysis first', 'error'); return; }
+
+  const container = $('market-brief-results');
+  container.innerHTML = '<div class="market-brief-card"><p class="text-muted">Loading AI market brief...</p></div>';
+  container.classList.remove('hidden');
+
+  try {
+    const res = await fetch('/api/ai/market-brief', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ zipCode: zip }),
+    });
+    const data = await res.json();
+    if (data.error) { container.innerHTML = `<div class="market-brief-card"><p style="color:var(--red)">${data.error}</p></div>`; return; }
+
+    renderMarketBrief(data.brief, data.source, data.cached, zip);
+  } catch (err) {
+    container.innerHTML = `<div class="market-brief-card"><p style="color:var(--red)">Failed: ${err.message}</p></div>`;
+  }
+}
+
+function renderMarketBrief(b, source, cached, zip) {
+  const outlook = (b.outlook || 'STABLE').toUpperCase();
+  const outlookClass = outlook === 'HEATING' ? 'heating' : outlook === 'COOLING' ? 'cooling' : 'stable';
+  const km = b.keyMetrics || {};
+
+  const metricsHtml = Object.entries(km).map(([key, val]) => {
+    const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
+    return `<div class="brief-metric"><div class="metric-value">${val || 'N/A'}</div><div class="metric-label">${label}</div></div>`;
+  }).join('');
+
+  $('market-brief-results').innerHTML = `
+    <div class="market-brief-card">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <span class="brief-outlook ${outlookClass}">${outlook}</span>
+        <span style="font-size:0.85rem;color:var(--text-muted)">Market Brief — ${zip}</span>
+        <span style="margin-left:auto;font-size:0.75rem;color:var(--text-muted)">Source: ${source}${cached ? ' (cached)' : ''}</span>
+      </div>
+      <div class="brief-thesis">${b.thesis || ''}</div>
+      <div class="brief-metrics">${metricsHtml}</div>
+      ${b.bestPropertyType ? `<div class="brief-property-type"><strong>Best Target:</strong> ${b.bestPropertyType}</div>` : ''}
+      ${b.forecast ? `<div class="brief-forecast"><strong>6-Month Forecast:</strong> ${b.forecast}</div>` : ''}
+    </div>
+  `;
+}
+
+// --- AI Portfolio Advisor ---
+async function requestPortfolioAdvisor() {
+  if (state.savedProperties.length < 2) { toast('Need at least 2 saved properties', 'error'); return; }
+
+  $('portfolio-ai-body').innerHTML = '<p class="text-muted">Analyzing portfolio...</p>';
+  show('portfolio-ai-modal');
+
+  try {
+    const ids = state.savedProperties.map(p => p.id).filter(Boolean);
+    const res = await fetch('/api/ai/portfolio-advisor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ids.length ? { propertyIds: ids } : {}),
+    });
+    const data = await res.json();
+    if (data.error) { $('portfolio-ai-body').innerHTML = `<p style="color:var(--red)">${data.error}</p>`; return; }
+
+    renderPortfolioAdvisor(data.analysis, data.source, data.cached);
+  } catch (err) {
+    $('portfolio-ai-body').innerHTML = `<p style="color:var(--red)">Failed: ${err.message}</p>`;
+  }
+}
+
+function renderPortfolioAdvisor(a, source, cached) {
+  const score = a.healthScore || 0;
+  const scoreClass = score >= 65 ? 'good' : score >= 40 ? 'fair' : 'poor';
+
+  const recsHtml = (a.recommendations || []).map(r => {
+    const action = (r.action || 'HOLD').toUpperCase();
+    const badgeClass = action === 'SELL' ? 'sell' : action === 'BUY_MORE' ? 'buy_more' : 'hold';
+    return `
+      <div class="portfolio-rec">
+        <span class="action-badge ${badgeClass}">${action.replace('_', ' ')}</span>
+        <div class="rec-text">
+          <div class="rec-address">${r.address || ''}</div>
+          <div>${r.reason || ''}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  $('portfolio-ai-body').innerHTML = `
+    <div class="portfolio-health">
+      <div class="score ${scoreClass}">${score}</div>
+      <div class="label">Portfolio Health Score</div>
+    </div>
+    <div class="portfolio-section">
+      <h4>Diversification</h4>
+      <p style="font-size:0.9rem;line-height:1.5">${a.diversification || 'N/A'}</p>
+    </div>
+    <div class="portfolio-section">
+      <h4>Risk Exposure</h4>
+      <p style="font-size:0.9rem;line-height:1.5">${a.riskExposure || 'N/A'}</p>
+    </div>
+    <div class="portfolio-section">
+      <h4>Recommendations</h4>
+      ${recsHtml || '<p style="font-size:0.9rem">No recommendations available</p>'}
+    </div>
+    ${a.buyNext ? `<div class="portfolio-buynext"><strong>Next Acquisition:</strong> ${a.buyNext}</div>` : ''}
+    <div style="font-size:0.75rem;color:var(--text-muted);margin-top:16px;text-align:right">Source: ${source}${cached ? ' (cached)' : ''}</div>
+  `;
 }

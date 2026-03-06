@@ -194,6 +194,13 @@
         <h1>Property Scanner</h1>
         <p>Set your criteria and find the best available properties</p>
       </div>
+      <div class="nl-search-bar">
+        <input type="text" id="nl-search-input" placeholder='Try: "3 bed under 400k in Austin" or "condos near 78701"' />
+        <button id="nl-search-btn" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg>
+          AI Search
+        </button>
+      </div>
       <div class="scanner-layout">
         <aside class="scanner-filters">
           <h3>Search Criteria</h3>
@@ -415,8 +422,14 @@
           <input type="text" id="momentum-state" placeholder="State (e.g. MN)" maxlength="2" />
           <button id="momentum-btn" class="btn btn-primary">Analyze</button>
           <button id="compare-neighborhoods-btn" class="btn btn-secondary" title="Compare multiple zip codes">Compare</button>
+          <button id="market-brief-btn" class="btn btn-secondary hidden" title="AI Market Brief">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"/><path d="M12 6v6l4 2"/></svg>
+            Market Brief
+          </button>
         </div>
       </div>
+
+      <div id="market-brief-results" class="hidden"></div>
 
       <div id="momentum-results" class="hidden">
         <!-- Gauge + Trend summary -->
@@ -675,6 +688,32 @@
           <input type="text" id="compare-zips" placeholder="78701, 78704, 78745">
         </div>
         <button id="compare-generate" class="btn btn-primary btn-full">Generate Comparison Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Verdict Modal -->
+  <div id="verdict-modal" class="calc-modal hidden">
+    <div class="calc-content" style="max-width:620px">
+      <div class="calc-header">
+        <h3>AI Property Verdict</h3>
+        <button id="verdict-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="calc-body" id="verdict-body">
+        <p class="text-muted">Loading AI analysis...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Portfolio Advisor Modal -->
+  <div id="portfolio-ai-modal" class="calc-modal hidden">
+    <div class="calc-content" style="max-width:660px">
+      <div class="calc-header">
+        <h3>AI Portfolio Advisor</h3>
+        <button id="portfolio-ai-close" class="btn-icon">&times;</button>
+      </div>
+      <div class="calc-body" id="portfolio-ai-body">
+        <p class="text-muted">Analyzing portfolio...</p>
       </div>
     </div>
   </div>
