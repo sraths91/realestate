@@ -1697,85 +1697,372 @@ function summarizeIncidents(city, rawIncidents) {
 }
 
 // ---------------------------------------------------------------------------
-// MN Suburban Aggregate Crime Data (BCA UCR 2023-2024, per-agency rates)
-// Covers Twin Cities metro suburbs where no incident-level API exists.
-// Rates are per 100,000 residents. Source: MN BCA Crime Data Explorer.
+// MN Statewide Crime Data (BCA Crime Data Explorer, 2024)
+// 274 city police depts + 86 county sheriffs — covers ALL of Minnesota.
+// Format: [name, county, population, crimeRate per 100K, pctCleared, lat, lon]
+// Source: https://cde.state.mn.us/DownloadData/CrimeRateAndClearanceByAgencyDownload
+// Geocoded via OpenStreetMap Nominatim.
+// Statewide 2024 split: ~14% violent, ~86% property (from BCA UCR 2024).
 // ---------------------------------------------------------------------------
-const MN_SUBURBAN_CRIME = {
-  // city: { population, violent, property, total, year }
-  'Bloomington':     { pop: 90781,  violent: 180, property: 2850, total: 3030, year: 2023 },
-  'Brooklyn Park':   { pop: 86478,  violent: 320, property: 3100, total: 3420, year: 2023 },
-  'Plymouth':        { pop: 81026,  violent: 65,  property: 1650, total: 1715, year: 2023 },
-  'Eagan':           { pop: 68747,  violent: 95,  property: 1680, total: 1775, year: 2023 },
-  'Eden Prairie':    { pop: 64198,  violent: 55,  property: 1420, total: 1475, year: 2023 },
-  'Maple Grove':     { pop: 72571,  violent: 45,  property: 1350, total: 1395, year: 2023 },
-  'Woodbury':        { pop: 75102,  violent: 60,  property: 1520, total: 1580, year: 2023 },
-  'Lakeville':       { pop: 69490,  violent: 50,  property: 1180, total: 1230, year: 2023 },
-  'Burnsville':      { pop: 64317,  violent: 190, property: 2550, total: 2740, year: 2023 },
-  'Richfield':       { pop: 36147,  violent: 240, property: 3200, total: 3440, year: 2023 },
-  'Coon Rapids':     { pop: 64855,  violent: 185, property: 2480, total: 2665, year: 2023 },
-  'Apple Valley':    { pop: 55135,  violent: 80,  property: 1550, total: 1630, year: 2023 },
-  'Minnetonka':      { pop: 53781,  violent: 50,  property: 1380, total: 1430, year: 2023 },
-  'Shakopee':        { pop: 43107,  violent: 120, property: 2100, total: 2220, year: 2023 },
-  'Roseville':       { pop: 36698,  violent: 130, property: 2880, total: 3010, year: 2023 },
-  'Maplewood':       { pop: 42090,  violent: 210, property: 2750, total: 2960, year: 2023 },
-  'Brooklyn Center': { pop: 32680,  violent: 450, property: 3500, total: 3950, year: 2023 },
-  'Fridley':         { pop: 29233,  violent: 260, property: 2900, total: 3160, year: 2023 },
-  'Inver Grove Heights': { pop: 37880, violent: 95, property: 1750, total: 1845, year: 2023 },
-  'Savage':          { pop: 33090,  violent: 55,  property: 1200, total: 1255, year: 2023 },
-  'Prior Lake':      { pop: 27710,  violent: 60,  property: 1300, total: 1360, year: 2023 },
-  'Cottage Grove':   { pop: 37734,  violent: 70,  property: 1400, total: 1470, year: 2023 },
-  'St. Louis Park':  { pop: 50010,  violent: 140, property: 2600, total: 2740, year: 2023 },
-  'Hopkins':         { pop: 18766,  violent: 170, property: 2900, total: 3070, year: 2023 },
-  'White Bear Lake': { pop: 25318,  violent: 100, property: 2100, total: 2200, year: 2023 },
-};
+const MN_CDE_CITIES = [
+  ['Ada','Norman',1690,177,66.7,47.2997,-96.5153],
+  ['Adrian','Nobles',1177,594,0.0,43.6349,-95.9334],
+  ['Aitkin','Aitkin',2149,3769,25.9,46.5334,-93.7097],
+  ['Akeley','Hubbard',432,2083,22.2,47.0042,-94.727],
+  ['Albany','Stearns',2848,1264,36.1,45.63,-94.57],
+  ['Albert Lea','Freeborn',18194,4111,45.9,43.648,-93.3683],
+  ['Alexandria','Douglas',15136,3660,66.1,45.8835,-95.3745],
+  ['Annandale','Wright',3451,1448,46.0,45.2627,-94.1244],
+  ['Anoka','Anoka',18022,3767,39.3,45.1977,-93.3872],
+  ['Apple Valley','Dakota',55028,3736,27.1,44.7319,-93.2177],
+  ['Appleton','Swift',1358,662,88.9,45.1969,-96.0198],
+  ['Arlington','Sibley',2326,859,60.0,44.6083,-94.0805],
+  ['Atwater','Kandiyohi',1073,372,75.0,45.1363,-94.781],
+  ['Audubon','Becker',561,1247,85.7,46.8633,-95.9817],
+  ['Austin','Mower',26160,4560,43.2,43.668,-92.9746],
+  ['Avon','Stearns',1713,1634,28.6,45.6091,-94.4517],
+  ['Babbitt','St. Louis',1370,1605,63.6,47.7087,-91.9441],
+  ['Bagley','Clearwater',1311,1983,73.1,47.5216,-95.3983],
+  ['Barnesville','Clay',2767,939,0.0,46.6522,-96.4198],
+  ['Battle Lake','Otter Tail',929,753,14.3,46.2811,-95.714],
+  ['Baxter','Crow Wing',9249,5362,54.8,46.3433,-94.2867],
+  ['Bayport','Washington',3712,969,36.1,45.0213,-92.7813],
+  ['Becker','Sherburne',5132,1363,60.0,45.3932,-93.8769],
+  ['Belgrade Brooten','Stearns',1380,942,38.5,45.5021,-95.13],
+  ['Belle Plaine','Scott',7433,1816,80.7,44.6227,-93.7686],
+  ['Bemidji','Beltrami',15853,11631,44.6,47.4723,-94.8833],
+  ['Benson','Swift',3425,992,100.0,45.315,-95.6],
+  ['Big Lake','Sherburne',12904,1472,33.7,45.3325,-93.7461],
+  ['Blackduck','Beltrami',810,1481,41.7,47.7333,-94.5482],
+  ['Blaine','Anoka',74913,2886,50.5,45.1608,-93.2349],
+  ['Blooming Prairie','Steele',1947,1027,20.0,43.8668,-93.0553],
+  ['Bloomington','Hennepin',86598,6432,54.6,44.8322,-93.3205],
+  ['Blue Earth','Faribault',3161,1455,76.1,43.6375,-94.1022],
+  ['Braham','Isanti',1792,223,25.0,45.7247,-93.1706],
+  ['Brainerd','Crow Wing',14615,7608,40.9,46.358,-94.2008],
+  ['Breckenridge','Wilkin',3301,3150,87.5,46.2652,-96.5816],
+  ['Breezy Point','Crow Wing',2814,852,87.5,46.6166,-94.2169],
+  ['Breitung Township','St. Louis',526,3422,5.6,47.856,-92.2337],
+  ['Brooklyn Center','Hennepin',31058,6764,28.0,45.0749,-93.3296],
+  ['Brooklyn Park','Hennepin',80665,6096,24.6,45.1005,-93.3444],
+  ['Brownton','McLeod',708,988,0.0,44.7319,-94.3503],
+  ['Buffalo Lake','Renville',630,793,100.0,44.7372,-94.6169],
+  ['Buffalo','Wright',16627,860,65.7,45.1719,-93.8747],
+  ['Burnsville','Dakota',64860,3638,26.6,44.7671,-93.2774],
+  ['Callaway','Becker',183,4371,50.0,46.9825,-95.9098],
+  ['Cambridge','Isanti',10802,2980,20.8,45.5727,-93.2244],
+  ['Canby','Yellow Medicine',1681,1070,22.2,44.7089,-96.2764],
+  ['Cannon Falls','Goodhue',4196,2955,42.7,44.5068,-92.9062],
+  ['Centennial Lakes','Anoka',12219,1653,33.2,45.1698,-93.1272],
+  ['Champlin','Hennepin',22532,2516,49.6,45.1889,-93.3975],
+  ['Chaska','Carver',29431,1719,46.6,44.7894,-93.6022],
+  ['Chatfield','Fillmore',2991,100,100.0,43.8446,-92.1881],
+  ['Chisholm','St. Louis',4663,3688,43.6,47.4899,-92.8835],
+  ['Clearbrook','Clearwater',466,643,66.7,47.6919,-95.4311],
+  ['Cleveland','Le Sueur',773,129,100.0,44.3255,-93.8377],
+  ['Cloquet','Carlton',12570,1909,55.8,46.7217,-92.4614],
+  ['Cold Spring / Richmond','Stearns',5797,2052,36.1,45.4558,-94.4286],
+  ['Coleraine','Itasca',1985,403,37.5,47.2888,-93.4277],
+  ['Columbia Heights','Anoka',23341,4417,21.3,45.046,-93.2518],
+  ['Coon Rapids','Anoka',63308,3367,40.0,45.1729,-93.3024],
+  ['Corcoran','Hennepin',8276,845,8.6,45.0951,-93.5476],
+  ['Cottage Grove','Washington',43131,1620,40.2,44.8277,-92.9438],
+  ['Crookston','Polk',7205,4760,52.5,47.774,-96.6081],
+  ['Crosby','Crow Wing',2354,1062,88.0,46.4822,-93.9578],
+  ['Crosslake','Crow Wing',2442,1228,20.0,46.6594,-94.1139],
+  ['Crystal','Hennepin',21477,4674,45.2,45.0318,-93.3606],
+  ['Cuyuna','Crow Wing',331,302,100.0,46.5169,-93.923],
+  ['Dawson','Lac qui Parle',1564,1662,42.3,44.9327,-96.0545],
+  ['Dayton','Hennepin',11273,1029,15.5,45.2439,-93.515],
+  ['Deephaven','Hennepin',3691,1164,34.9,44.9297,-93.5225],
+  ['Deer River','Itasca',903,2547,17.4,47.3328,-93.7928],
+  ['Deerwood','Crow Wing',578,2249,76.9,46.4736,-93.8989],
+  ['Detroit Lakes','Becker',9969,2979,36.0,46.8172,-95.8453],
+  ['Dilworth','Clay',4828,9879,74.6,46.8766,-96.7034],
+  ['Duluth','St. Louis',88003,5705,33.4,46.7838,-92.1053],
+  ['Dundas','Rice',1774,2536,17.8,44.4294,-93.2021],
+  ['Eagan','Dakota',66956,3149,28.9,44.8182,-93.1659],
+  ['East Grand Forks','Polk',8859,1490,43.2,47.9317,-97.0176],
+  ['East Range','St. Louis',3634,110,25.0,47.5451,-92.3185],
+  ['Eden Prairie','Hennepin',61511,2708,41.9,44.8547,-93.4708],
+  ['Eden Valley','Meeker',1072,1305,35.7,45.325,-94.5476],
+  ['Edina','Hennepin',53347,2841,43.4,44.8897,-93.3501],
+  ['Elk River','Sherburne',27826,2885,33.4,45.3039,-93.5672],
+  ['Elko New Market','Scott',5126,39,100.0,44.5658,-93.3388],
+  ['Ely','St. Louis',3211,2366,31.6,47.9016,-91.8572],
+  ['Eveleth','St. Louis',3417,5853,45.0,47.4628,-92.5388],
+  ['Fairfax','Renville',1202,2163,15.4,44.5291,-94.7208],
+  ['Fairmont','Martin',10173,4344,52.5,43.6522,-94.4611],
+  ['Faribault','Rice',24708,3059,31.7,44.295,-93.2688],
+  ['Farmington','Dakota',23995,1479,17.5,44.6402,-93.1435],
+  ['Fergus Falls','Otter Tail',14245,5005,34.2,46.283,-96.0776],
+  ['Floodwood','St. Louis',517,1353,14.3,46.9291,-92.9196],
+  ['Foley','Benton',2711,2950,8.8,45.6635,-93.9137],
+  ['Forest Lake','Washington',20680,3442,30.1,45.2791,-92.9852],
+  ['Fosston','Polk',1368,5116,40.0,47.5763,-95.7514],
+  ['Frazee','Becker',1301,538,28.6,46.7278,-95.7001],
+  ['Fridley','Anoka',30355,5570,42.5,45.0838,-93.259],
+  ['Fulda','Murray',1322,1285,11.8,43.8705,-95.6003],
+  ['Gaylord','Sibley',2341,3972,45.2,44.553,-94.2206],
+  ['Gibbon','Sibley',788,1395,36.4,44.5339,-94.5264],
+  ['Gilbert','St. Louis',1656,6219,35.9,47.4889,-92.4652],
+  ['Glencoe','McLeod',5652,2689,31.6,44.7692,-94.1516],
+  ['Glenwood','Pope',2630,2281,28.3,45.6502,-95.3898],
+  ['Glyndon','Clay',1376,1380,52.6,46.8752,-96.579],
+  ['Golden Valley','Hennepin',20806,1634,14.7,44.9861,-93.3785],
+  ['Goodview','Winona',4077,294,33.3,44.062,-91.6954],
+  ['Grand Rapids','Itasca',11333,1782,16.3,47.2372,-93.5302],
+  ['Granite Falls','Yellow Medicine',2670,2022,66.7,44.81,-95.5456],
+  ['Hallock','Kittson',863,347,66.7,48.7744,-96.9464],
+  ['Hastings','Dakota',22112,2690,40.2,44.7427,-92.8519],
+  ['Hawley','Clay',2299,1000,21.7,46.8808,-96.3167],
+  ['Hector','Renville',981,1732,58.8,44.7439,-94.7155],
+  ['Henning','Otter Tail',860,465,0.0,46.3216,-95.4453],
+  ['Hermantown','St. Louis',10196,3893,62.0,46.8069,-92.2382],
+  ['Heron Lake','Jackson',587,681,0.0,43.795,-95.3203],
+  ['Hibbing','St. Louis',15915,1118,70.8,47.4272,-92.9377],
+  ['Hill City','Aitkin',608,1315,50.0,46.9933,-93.5986],
+  ['Hopkins','Hennepin',18454,4112,49.1,44.9244,-93.4114],
+  ['Houston','Houston',978,1329,7.7,43.7633,-91.5685],
+  ['Howard Lake','Wright',2220,720,37.5,45.0608,-94.0733],
+  ['Hutchinson','McLeod',14730,3306,46.2,44.8877,-94.3697],
+  ['International Falls','Koochiching',5542,3644,27.7,48.601,-93.4106],
+  ['Inver Grove Heights','Dakota',36212,3344,29.9,44.8479,-93.0428],
+  ['Isanti','Isanti',7540,1883,37.3,45.4902,-93.2477],
+  ['Isle','Mille Lacs',830,10000,42.2,46.138,-93.4708],
+  ['Janesville','Waseca',2484,2173,13.0,44.1161,-93.708],
+  ['Jordan','Scott',6781,1754,54.6,44.6663,-93.6262],
+  ['Kasson','Dodge',7208,1581,36.8,44.0297,-92.7503],
+  ['Keewatin','Itasca',968,3305,18.8,47.3973,-93.0779],
+  ['La Crescent','Houston',5279,1079,52.6,43.828,-91.304],
+  ['Lake City','Wabasha',5336,2380,38.6,44.4478,-92.2679],
+  ['Lake Crystal','Blue Earth',2487,1487,43.2,44.1058,-94.2188],
+  ['Lake Park','Becker',716,1117,0.0,46.8856,-96.0957],
+  ['Lake Shore','Cass',1139,877,0.0,46.4855,-94.3606],
+  ['Lakefield','Jackson',1712,175,33.3,43.6775,-95.1717],
+  ['Lakes Area','Chisago',10781,1947,15.7,45.3896,-92.8495],
+  ['Lakeville','Dakota',78436,1463,26.4,44.6501,-93.2433],
+  ['Lamberton','Redwood',779,1925,6.7,44.2311,-95.2642],
+  ['Le Center','Le Sueur',2520,277,85.7,44.3894,-93.7302],
+  ['Le Sueur','Le Sueur',4226,804,70.6,44.4612,-93.9154],
+  ['Lester Prairie','McLeod',1902,1314,40.0,44.8839,-94.0416],
+  ['Lewiston','Winona',1501,732,0.0,43.9847,-91.8696],
+  ['Lino Lakes','Anoka',22685,1415,38.6,45.1602,-93.0888],
+  ['Litchfield','Meeker',6512,2564,24.6,45.1272,-94.528],
+  ['Little Falls','Morrison',9088,4170,44.6,45.9764,-94.3625],
+  ['Long Prairie','Todd',3722,3062,46.5,45.9741,-94.8653],
+  ['Lonsdale','Rice',5016,837,0.0,44.4802,-93.4286],
+  ['Madelia','Watonwan',2367,1056,24.0,44.0507,-94.4183],
+  ['Madison Lake','Blue Earth',1318,1593,61.9,44.2044,-93.8155],
+  ['Mankato','Blue Earth',46137,6463,49.9,44.1659,-94.0028],
+  ['Maple Grove','Hennepin',71622,3113,26.4,45.0985,-93.4419],
+  ['Mapleton','Blue Earth',2144,1305,64.3,43.9289,-93.9561],
+  ['Maplewood','Ramsey',39638,6289,32.2,45.0082,-93.0457],
+  ['Marshall','Lyon',13924,2556,82.9,44.447,-95.7887],
+  ['Medina','Hennepin',7104,1295,12.0,45.0151,-93.5744],
+  ['Melrose','Stearns',3612,692,52.0,45.6747,-94.8076],
+  ['Menahga','Wadena',1347,519,100.0,46.7539,-95.0977],
+  ['Mendota Heights','Dakota',11501,2617,32.9,44.8836,-93.1383],
+  ['Milaca','Mille Lacs',3066,3620,21.6,45.7558,-93.6544],
+  ['Minneapolis','Hennepin',423282,11077,13.6,44.9773,-93.2655],
+  ['Minneota','Lyon',1344,967,15.4,44.5588,-95.9856],
+  ['Minnesota Lake','Faribault',657,456,0.0,43.841,-93.8327],
+  ['Minnetonka','Hennepin',51935,2922,35.9,44.9405,-93.4639],
+  ['Minnetrista','Hennepin',11072,903,38.0,44.9236,-93.7187],
+  ['Montgomery','Le Sueur',3595,389,100.0,44.4389,-93.5813],
+  ['Moorhead','Clay',45424,4143,36.4,46.8739,-96.7539],
+  ['Motley','Morrison',691,3328,8.7,46.3366,-94.6461],
+  ['Mounds View','Ramsey',12730,2977,27.7,45.1069,-93.2076],
+  ['Mountain Lake','Cottonwood',1929,1347,42.3,43.9393,-94.9309],
+  ['Nashwauk','Itasca',955,1047,20.0,47.3775,-93.1664],
+  ['New Brighton','Ramsey',22022,2765,22.7,45.0629,-93.2061],
+  ['New Hope','Hennepin',20319,4911,12.9,45.0347,-93.3861],
+  ['New Prague','Scott',8267,2020,35.3,44.5436,-93.5159],
+  ['New Richland','Waseca',1211,4789,36.2,43.8938,-93.4938],
+  ['New Ulm','Brown',13858,2518,64.5,44.314,-94.4614],
+  ['New York Mills','Otter Tail',1356,737,30.0,46.518,-95.3763],
+  ['Nisswa','Crow Wing',2175,2160,27.7,46.5205,-94.2886],
+  ['North Branch','Chisago',12137,758,31.5,45.5114,-92.9802],
+  ['North Mankato','Nicollet',14021,3138,35.7,44.1733,-94.0338],
+  ['North St Paul','Ramsey',12762,3149,16.7,45.0123,-92.9923],
+  ['Northfield','Rice',21099,2748,38.6,44.4582,-93.1612],
+  ['Oak Park Heights','Washington',4625,5102,39.0,45.0314,-92.793],
+  ['Oakdale','Washington',28214,4086,29.1,44.9856,-92.9646],
+  ['Olivia','Renville',2270,2555,50.0,44.7764,-94.9897],
+  ['Onamia','Mille Lacs',850,7058,23.3,46.0705,-93.6677],
+  ['Orono','Hennepin',18943,1472,40.9,44.9714,-93.6044],
+  ['Osakis','Douglas',1747,1831,43.8,45.8669,-95.1524],
+  ['Osseo','Hennepin',2472,3155,15.4,45.1194,-93.4025],
+  ['Owatonna','Steele',26573,2291,46.8,44.084,-93.2261],
+  ['Park Rapids','Hubbard',4348,4990,65.0,46.9222,-95.0586],
+  ['Parkers Prairie','Otter Tail',1031,581,66.7,46.153,-95.3289],
+  ['Paynesville','Stearns',2616,726,52.6,45.3805,-94.7119],
+  ['Pelican Rapids','Otter Tail',2599,615,43.8,46.5708,-96.0831],
+  ['Perham','Otter Tail',3718,645,29.2,46.5944,-95.5725],
+  ['Pierz','Morrison',1473,3801,5.4,45.9772,-94.1035],
+  ['Pine River','Cass',935,3315,6.5,46.718,-94.4042],
+  ['Plainview','Wabasha',3541,734,73.1,44.1647,-92.1718],
+  ['Plymouth','Hennepin',76577,2170,23.3,45.0065,-93.4665],
+  ['Preston','Fillmore',1326,1055,14.3,43.6702,-92.0832],
+  ['Princeton','Mille Lacs',5418,3414,61.1,45.5698,-93.5803],
+  ['Prior Lake','Scott',28163,2712,47.4,44.7133,-93.4227],
+  ['Proctor','St. Louis',3078,1981,37.7,46.7472,-92.2255],
+  ['Ramsey','Anoka',28813,1534,28.3,45.2321,-93.4605],
+  ['Red Wing','Goodhue',16819,5446,45.1,44.5625,-92.5338],
+  ['Redwood Falls','Redwood',5044,4004,49.5,44.5394,-95.1164],
+  ['Renville','Renville',1254,3269,29.3,44.7891,-95.2117],
+  ['Rice','Benton',2250,666,13.3,45.7537,-94.2206],
+  ['Richfield','Hennepin',36287,5244,43.0,44.8766,-93.2878],
+  ['Robbinsdale','Hennepin',13771,4233,32.1,45.0313,-93.3396],
+  ['Rochester','Olmsted',122694,3591,42.5,44.0234,-92.463],
+  ['Rogers','Hennepin',13716,4017,41.9,45.1889,-93.5525],
+  ['Roseau','Roseau',2677,2054,43.6,48.8458,-95.7613],
+  ['Rosemount','Dakota',28220,1534,33.3,44.7392,-93.1261],
+  ['Roseville','Ramsey',35507,12549,44.7,45.0061,-93.1566],
+  ['Royalton','Morrison',1279,4222,11.1,45.8299,-94.2937],
+  ['Sartell','Stearns',19845,2015,48.5,45.6216,-94.2069],
+  ['Sauk Centre','Stearns',4626,2075,55.2,45.7375,-94.9525],
+  ['Sauk Rapids','Benton',13736,2307,46.4,45.5913,-94.1674],
+  ['Savage','Scott',33140,2275,42.8,44.7779,-93.3356],
+  ['Shakopee','Scott',48239,3082,41.2,44.798,-93.5269],
+  ['Sherburn Welcome','Martin',1047,2387,44.0,43.6623,-94.7323],
+  ['Silver Bay','Lake',1796,668,50.0,47.2943,-91.2574],
+  ['Slayton','Murray',1965,1984,30.8,43.9877,-95.7558],
+  ['Sleepy Eye','Brown',3495,629,50.0,44.2972,-94.7242],
+  ['South Lake Minnetonka','Hennepin',11961,735,14.8,44.892,-93.4414],
+  ['South St Paul','Dakota',20648,4324,40.8,44.8907,-93.0373],
+  ['Spring Lake Park','Anoka',7007,3567,11.6,45.1154,-93.2493],
+  ['Springfield','Brown',1980,1616,0.0,44.2386,-94.9758],
+  ['St Anthony','Hennepin',12658,4384,35.9,45.0283,-93.2187],
+  ['St Charles','Winona',4042,1731,17.1,43.9694,-92.066],
+  ['St Cloud','Stearns',71492,6424,48.9,45.5616,-94.1642],
+  ['St Francis','Anoka',8534,2367,35.6,45.3864,-93.3597],
+  ['St James','Watonwan',4669,2291,57.9,43.9825,-94.6269],
+  ['St Joseph','Stearns',6699,2000,59.7,45.5645,-94.3181],
+  ['St Louis Park','Hennepin',49592,6081,25.7,44.9476,-93.3569],
+  ['St Paul Park','Washington',5315,2351,28.0,44.8479,-92.9981],
+  ['St Paul','Ramsey',304051,6935,18.8,44.9497,-93.0931],
+  ['St Peter','Nicollet',12362,2127,63.1,44.3238,-93.9585],
+  ['Staples','Todd',3042,3780,29.6,46.355,-94.7933],
+  ['Starbuck','Pope',1420,563,75.0,45.6145,-95.5311],
+  ['Stillwater','Washington',19185,2053,42.9,45.0559,-92.8076],
+  ['Thief River Falls','Pennington',8816,3754,19.3,48.1172,-96.1771],
+  ['Trimont','Martin',688,1598,27.3,43.7622,-94.7072],
+  ['Truman','Martin',1056,1136,25.0,43.8277,-94.4389],
+  ['Two Harbors','Lake',3498,1743,36.1,47.0257,-91.6731],
+  ['Tyler','Lincoln',1093,274,33.3,44.2783,-96.1348],
+  ['Verndale','Wadena',509,196,100.0,46.3983,-95.0147],
+  ['Virginia','St. Louis',8253,5719,73.1,47.5233,-92.5366],
+  ['Wabasha','Wabasha',2604,3264,38.8,44.3839,-92.032],
+  ['Wadena','Wadena',4327,2703,58.1,46.4425,-95.1361],
+  ['Waite Park','Stearns',8413,6180,55.0,45.5537,-94.2335],
+  ['Walker','Cass',984,1829,11.1,47.1016,-94.5798],
+  ['Warroad','Roseau',2006,697,92.9,48.9053,-95.3144],
+  ['Waseca','Waseca',9219,2690,60.9,44.0777,-93.5076],
+  ['Waterville','Le Sueur',1754,399,85.7,44.219,-93.568],
+  ['Wayzata','Hennepin',6232,2647,23.0,44.9708,-93.5119],
+  ['Wells','Faribault',2396,876,61.9,43.7441,-93.7256],
+  ['West Concord','Dodge',834,719,33.3,44.1534,-92.8992],
+  ['West Hennepin','Hennepin',5225,1148,43.3,44.9719,-93.2463],
+  ['West St Paul','Dakota',22128,7515,36.3,44.9102,-93.0802],
+  ['Westbrook','Cottonwood',727,137,0.0,44.0406,-95.4345],
+  ['White Bear Lake','Ramsey',23106,2960,15.1,45.0838,-93.0069],
+  ['Willmar','Kandiyohi',21437,4133,51.9,45.1219,-95.0435],
+  ['Windom','Cottonwood',4793,2670,46.1,43.8663,-95.1169],
+  ['Winona','Winona',26045,4231,48.7,44.05,-91.6392],
+  ['Winthrop','Sibley',1328,903,50.0,44.543,-94.3664],
+  ['Woodbury','Washington',80940,2454,44.2,44.9199,-92.9339],
+  ['Worthington','Nobles',13523,3150,66.7,43.6205,-95.5956],
+  ['Wyoming','Chisago',8143,1510,14.6,45.3364,-92.9972],
+  ['Zumbrota','Goodhue',4101,1121,10.9,44.294,-92.6689],
+];
+// County sheriff data: [county, population, crimeRate, pctCleared]
+const MN_CDE_COUNTIES = [
+  ['Aitkin',13223,2639,30.7],['Anoka',89082,1315,27.0],['Becker',22862,1614,30.1],
+  ['Beltrami',30580,2128,39.5],['Benton',14065,1052,41.9],['Big Stone',5127,2886,19.6],
+  ['Blue Earth',18742,1654,50.3],['Brown',6401,1234,13.9],['Carlton',24763,1332,33.6],
+  ['Carver',83795,1566,48.7],['Cass',28543,1867,28.5],['Chippewa',6052,33,50.0],
+  ['Chisago',28561,1193,47.8],['Clay',10397,1606,35.3],['Clearwater',6957,689,41.7],
+  ['Cook',5699,1912,9.2],['Cottonwood',3895,308,16.7],['Crow Wing',32494,1138,24.3],
+  ['Dakota',22011,1258,57.4],['Dodge',13280,1438,44.0],['Douglas',23820,1691,43.7],
+  ['Faribault',6385,1848,48.3],['Fillmore',16752,196,36.4],['Freeborn',12435,1769,34.1],
+  ['Goodhue',20684,2286,31.5],['Grant',6204,886,96.4],['Hennepin',15115,5484,80.3],
+  ['Houston',9114,1481,40.0],['Hubbard',17780,2694,55.1],['Isanti',24005,2099,21.2],
+  ['Itasca',28882,1630,47.3],['Jackson',7673,1837,36.2],['Kanabec',16921,1660,24.9],
+  ['Kandiyohi',21679,1928,52.9],['Kittson',3181,974,51.6],['Koochiching',6209,740,17.4],
+  ['Lac qui Parle',5095,824,19.0],['Lake',5627,675,36.8],['Le Sueur',13277,692,59.8],
+  ['Lincoln',4437,788,37.1],['Lyon',8328,1296,30.6],['Mahnomen',5288,3479,38.6],
+  ['Marshall',8808,488,48.8],['Martin',6739,816,49.1],['McLeod',11874,2071,59.3],
+  ['Meeker',16616,1576,29.4],['Mille Lacs',18069,3315,49.6],['Morrison',22086,2254,16.7],
+  ['Mower',14214,2863,35.1],['Murray',4786,689,27.3],['Nicollet',8039,472,81.6],
+  ['Nobles',7040,1136,60.0],['Norman',4654,322,86.7],['Olmsted',42839,1314,44.2],
+  ['Otter Tail',36434,1229,41.1],['Pennington',4931,2007,23.2],['Pine',30885,2493,22.7],
+  ['Pipestone',9260,1468,56.6],['Polk',13000,1500,29.2],['Pope',7465,817,27.9],
+  ['Ramsey',79079,3153,33.0],['Red Lake',3933,635,88.0],['Redwood',7936,1789,66.9],
+  ['Renville',7568,2867,26.3],['Rice',17420,769,29.9],['Rock',9585,333,43.8],
+  ['Roseau',10672,562,70.0],['Scott',24976,668,24.6],['Sherburne',50609,1065,51.2],
+  ['Sibley',7537,809,42.6],['St. Louis',57803,1826,35.4],['Stearns',50671,858,48.7],
+  ['Steele',9208,1737,30.0],['Stevens',9826,2188,38.6],['Swift',4985,80,25.0],
+  ['Todd',19983,1606,39.9],['Traverse',3091,905,14.3],['Wabasha',11362,352,40.0],
+  ['Wadena',6693,776,84.6],['Waseca',6223,2410,21.3],['Washington',78600,1787,27.3],
+  ['Watonwan',4073,2160,59.1],['Wilkin',2997,467,50.0],['Winona',14423,1338,21.2],
+  ['Wright',133209,1171,56.2],['Yellow Medicine',6075,757,73.9],
+];
 
-/** Reverse-geocode to find the nearest MN suburb (within ~5 miles). */
-function findMNSuburb(lat, lon) {
-  // Approximate metro area check (7-county)
-  if (lat < 44.65 || lat > 45.30 || lon < -93.90 || lon > -92.75) return null;
+// MN statewide 2024 violent/property split ratio (from BCA UCR 2024 report)
+const MN_VIOLENT_RATIO = 0.14;
 
-  // Check each suburb — use simple centroid approximation
-  // These are approximate city center coords
-  const centers = {
-    'Bloomington':     { lat: 44.840, lon: -93.298 },
-    'Brooklyn Park':   { lat: 45.094, lon: -93.356 },
-    'Plymouth':        { lat: 45.010, lon: -93.456 },
-    'Eagan':           { lat: 44.804, lon: -93.167 },
-    'Eden Prairie':    { lat: 44.854, lon: -93.471 },
-    'Maple Grove':     { lat: 45.072, lon: -93.456 },
-    'Woodbury':        { lat: 44.924, lon: -92.959 },
-    'Lakeville':       { lat: 44.650, lon: -93.243 },
-    'Burnsville':      { lat: 44.767, lon: -93.278 },
-    'Richfield':       { lat: 44.883, lon: -93.283 },
-    'Coon Rapids':     { lat: 45.120, lon: -93.303 },
-    'Apple Valley':    { lat: 44.732, lon: -93.218 },
-    'Minnetonka':      { lat: 44.921, lon: -93.468 },
-    'Shakopee':        { lat: 44.798, lon: -93.527 },
-    'Roseville':       { lat: 45.006, lon: -93.157 },
-    'Maplewood':       { lat: 44.953, lon: -93.025 },
-    'Brooklyn Center': { lat: 45.076, lon: -93.330 },
-    'Fridley':         { lat: 45.086, lon: -93.263 },
-    'Inver Grove Heights': { lat: 44.848, lon: -93.043 },
-    'Savage':          { lat: 44.767, lon: -93.336 },
-    'Prior Lake':      { lat: 44.713, lon: -93.423 },
-    'Cottage Grove':   { lat: 44.828, lon: -92.944 },
-    'St. Louis Park':  { lat: 44.948, lon: -93.348 },
-    'Hopkins':         { lat: 44.925, lon: -93.401 },
-    'White Bear Lake': { lat: 45.084, lon: -93.010 },
-  };
+/** Find nearest MN city or county for given coordinates. */
+function findMNCityForCoords(lat, lon) {
+  // Quick bounds check: Minnesota lat ~43.5–49.4, lon ~-97.2–-89.5
+  if (lat < 43.3 || lat > 49.5 || lon < -97.5 || lon > -89.0) return null;
 
   let closest = null;
   let minDist = Infinity;
-  for (const [name, c] of Object.entries(centers)) {
-    const dist = Math.sqrt((lat - c.lat) ** 2 + (lon - c.lon) ** 2);
-    if (dist < minDist) { minDist = dist; closest = name; }
+  for (const row of MN_CDE_CITIES) {
+    // [name, county, pop, rate, cleared, lat, lon]
+    if (row[2] === 0) continue; // skip zero-pop entries
+    const dlat = lat - row[5];
+    const dlon = lon - row[6];
+    const dist = dlat * dlat + dlon * dlon;
+    if (dist < minDist) { minDist = dist; closest = row; }
   }
 
-  // ~0.07 degrees ≈ 5 miles
-  if (minDist > 0.07) return null;
-  const data = MN_SUBURBAN_CRIME[closest];
-  return data ? { name: closest, ...data } : null;
+  // ~0.08 deg ≈ 5.5 miles — match to nearest city within this radius
+  if (closest && minDist < 0.0064) { // 0.08^2
+    const totalRate = closest[3];
+    return {
+      type: 'city',
+      name: closest[0],
+      county: closest[1],
+      pop: closest[2],
+      totalRate,
+      violentRate: Math.round(totalRate * MN_VIOLENT_RATIO),
+      propertyRate: Math.round(totalRate * (1 - MN_VIOLENT_RATIO)),
+      pctCleared: closest[4],
+    };
+  }
+
+  // Fallback: find county by matching nearest city's county (even if > 5.5 mi)
+  if (closest && minDist < 0.25) { // ~35 miles — still in same general area
+    const countyName = closest[1];
+    const countyRow = MN_CDE_COUNTIES.find(c => c[0] === countyName);
+    if (countyRow) {
+      const totalRate = countyRow[2];
+      return {
+        type: 'county',
+        name: countyName + ' County',
+        county: countyName,
+        pop: countyRow[1],
+        totalRate,
+        violentRate: Math.round(totalRate * MN_VIOLENT_RATIO),
+        propertyRate: Math.round(totalRate * (1 - MN_VIOLENT_RATIO)),
+        pctCleared: countyRow[3],
+      };
+    }
+  }
+
+  return null;
 }
 
 app.get('/api/crime/nearby', async (req, res) => {
@@ -1790,25 +2077,30 @@ app.get('/api/crime/nearby', async (req, res) => {
 
     const city = findCityForCoords(latF, lonF);
 
-    // If no incident-level city match, try MN suburban aggregate
+    // If no incident-level city match, try MN statewide BCA data (274 cities + 86 counties)
     if (!city) {
-      const suburb = findMNSuburb(latF, lonF);
-      if (suburb) {
-        const safeLevel = suburb.violent < 100 ? 'Low' : suburb.violent < 200 ? 'Moderate' : suburb.violent < 350 ? 'Elevated' : 'High';
+      const mnMatch = findMNCityForCoords(latF, lonF);
+      if (mnMatch) {
+        const safeLevel = mnMatch.violentRate < 100 ? 'Low' : mnMatch.violentRate < 300 ? 'Moderate' : mnMatch.violentRate < 600 ? 'Elevated' : 'High';
         return res.json({
           available: true,
           dataType: 'aggregate',
-          cityId: suburb.name.toLowerCase().replace(/\s+/g, '-'),
-          cityName: suburb.name,
-          source: 'MN Bureau of Criminal Apprehension (BCA)',
-          year: suburb.year,
-          population: suburb.pop,
-          violentRate: suburb.violent,
-          propertyRate: suburb.property,
-          totalRate: suburb.total,
+          cityId: mnMatch.name.toLowerCase().replace(/[\s/.]+/g, '-'),
+          cityName: mnMatch.name,
+          county: mnMatch.county,
+          matchType: mnMatch.type, // 'city' or 'county'
+          source: 'MN Bureau of Criminal Apprehension (BCA Crime Data Explorer)',
+          year: 2024,
+          population: mnMatch.pop,
+          violentRate: mnMatch.violentRate,
+          propertyRate: mnMatch.propertyRate,
+          totalRate: mnMatch.totalRate,
+          pctCleared: mnMatch.pctCleared,
           safetyLevel: safeLevel,
           hasSpatialQuery: false,
-          note: 'Aggregate crime rates per 100,000 residents. Incident-level data is not available for this city.',
+          note: mnMatch.type === 'county'
+            ? `County-level crime rates per 100,000 residents. ${mnMatch.county} County sheriff jurisdiction.`
+            : 'City-level crime rates per 100,000 residents from BCA Crime Data Explorer. Violent/property split estimated from statewide ratio.',
         });
       }
       return res.json({ available: false, reason: 'No crime data coverage for this location' });
