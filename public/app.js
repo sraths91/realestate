@@ -1728,7 +1728,7 @@ function renderMomentumScore(data) {
 }
 
 // ---------------------------------------------------------------------------
-// MINNEAPOLIS CRIME NEARBY
+// MULTI-CITY CRIME NEARBY
 // ---------------------------------------------------------------------------
 async function fetchCrimeNearby(lat, lon) {
   const section = $('crime-nearby-section');
@@ -1744,6 +1744,15 @@ async function fetchCrimeNearby(lat, lon) {
       return;
     }
 
+    // Update section header with city name
+    const title = $('crime-nearby-title');
+    const subtitle = $('crime-nearby-subtitle');
+    if (title) title.textContent = `${data.cityName || 'Local'} Crime — Nearby Incidents`;
+    if (subtitle) {
+      const spatialNote = data.hasSpatialQuery === false ? ' (city-wide, not radius-filtered)' : '';
+      subtitle.textContent = `Real-time incident data from ${data.source || 'local police'}${spatialNote}`;
+    }
+
     renderCrimeNearby(data, content);
     section.classList.remove('hidden');
   } catch {
@@ -1754,6 +1763,7 @@ async function fetchCrimeNearby(lat, lon) {
 function renderCrimeNearby(data, container) {
   const cats = data.categories || {};
   const total = data.totalCurrent || 0;
+  const totalDisplay = data.resultsCapped ? `${total}+` : `${total}`;
   const changePct = data.changePercent;
   const changeClass = changePct > 0 ? 'crime-up' : changePct < 0 ? 'crime-down' : 'crime-flat';
   const changeStr = changePct != null
@@ -1761,7 +1771,9 @@ function renderCrimeNearby(data, container) {
     : 'N/A';
   const changeLabel = changePct != null
     ? `vs ${data.priorYear} (annualized)`
-    : '';
+    : data.resultsCapped ? 'YoY unavailable (data capped)' : '';
+
+  const radiusLabel = data.hasSpatialQuery === false ? 'city-wide' : `${data.radiusMiles || 0.5} mi`;
 
   // Top offenses
   const topHtml = (data.topOffenses || []).map(o =>
@@ -1785,8 +1797,8 @@ function renderCrimeNearby(data, container) {
   container.innerHTML = `
     <div class="crime-overview">
       <div class="crime-stat-card crime-total">
-        <div class="crime-big-number">${total}</div>
-        <div class="crime-stat-label">Incidents in ${data.currentYear} (0.5 mi)</div>
+        <div class="crime-big-number">${totalDisplay}</div>
+        <div class="crime-stat-label">Incidents in ${data.currentYear} (${radiusLabel})</div>
       </div>
       <div class="crime-stat-card crime-trend">
         <div class="crime-big-number ${changeClass}">${changeStr}</div>
@@ -1823,7 +1835,7 @@ function renderCrimeNearby(data, container) {
         ${recentHtml || '<p class="text-muted">No recent incidents</p>'}
       </div>
     </div>
-    <div class="crime-source">Source: ${data.source || 'Minneapolis PD'}${cachedNote}</div>
+    <div class="crime-source">Source: ${data.source || 'Local PD'}${cachedNote}</div>
   `;
 }
 

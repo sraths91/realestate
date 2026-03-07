@@ -1446,18 +1446,262 @@ app.get('/api/momentum', async (req, res) => {
 });
 
 // ===========================================================================
-// MINNEAPOLIS NEARBY CRIME (ArcGIS FeatureServer — free, no key)
+// MULTI-CITY NEARBY CRIME — Scalable Registry (ArcGIS + Socrata, free, no key)
 // ===========================================================================
-const MPLS_CRIME_BASE = 'https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services';
-const MPLS_OFFENSE_CATEGORIES = {
-  MURDR: 'violent', RAPE: 'violent', ROBBRY: 'violent', ASLT: 'violent',
-  CSCR: 'violent', KIDNAP: 'violent', HMCDE: 'violent',
-  BURGD: 'property', BURGO: 'property', THEFT: 'property', AUTOTH: 'property',
-  TMVP: 'property', SHOPLF: 'property', ARSN: 'property', VANDAL: 'property',
-  FORGE: 'property', FRAUD: 'property', STOLP: 'property',
-  NARCO: 'other', DUI: 'other', DWEAP: 'other', DSORD: 'other',
-  PRST: 'other', LIQUOR: 'other', TRSPS: 'other', WEAPN: 'other',
-};
+
+/** Each city entry defines its bbox, API type, endpoint, field mappings, and offense categorization. */
+const CITY_CRIME_REGISTRY = [
+  // ---------- MINNEAPOLIS (ArcGIS, year-based services) ----------
+  {
+    id: 'minneapolis',
+    name: 'Minneapolis',
+    state: 'MN',
+    source: 'Minneapolis Police Department',
+    type: 'arcgis',
+    bbox: { minLat: 44.85, maxLat: 45.10, minLon: -93.45, maxLon: -93.15 },
+    hasSpatialQuery: true,
+    buildUrl: (year, _lat, _lon, _radiusM) => {
+      const base = 'https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services';
+      return `${base}/Police_Incidents_${year}/FeatureServer/0/query`;
+    },
+    buildParams: (lat, lon, radiusM) => ({
+      where: '1=1',
+      geometry: JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }),
+      geometryType: 'esriGeometryPoint',
+      spatialRel: 'esriSpatialRelIntersects',
+      distance: radiusM,
+      units: 'esriSRUnit_Meter',
+      inSR: 4326,
+      outFields: 'offense,description,reportedDate,centerLat,centerLong,neighborhood',
+      resultRecordCount: 2000,
+      orderByFields: 'reportedDate DESC',
+      f: 'json',
+    }),
+    parseFeatures: (data) => (data.features || []).map(f => f.attributes),
+    normalizeIncident: (inc) => ({
+      offenseCode: (inc.offense || '').toUpperCase(),
+      description: inc.description || inc.offense || '',
+      date: inc.reportedDate ? new Date(inc.reportedDate).toLocaleDateString() : null,
+      neighborhood: inc.neighborhood || null,
+      lat: inc.centerLat, lon: inc.centerLong,
+    }),
+    categorizeOffense: (code) => {
+      const map = {
+        MURDR:'violent', RAPE:'violent', ROBBRY:'violent', ASLT:'violent',
+        CSCR:'violent', KIDNAP:'violent', HMCDE:'violent',
+        BURGD:'property', BURGO:'property', THEFT:'property', AUTOTH:'property',
+        TMVP:'property', SHOPLF:'property', ARSN:'property', VANDAL:'property',
+        FORGE:'property', FRAUD:'property', STOLP:'property',
+        NARCO:'other', DUI:'other', DWEAP:'other', DSORD:'other',
+        PRST:'other', LIQUOR:'other', TRSPS:'other', WEAPN:'other',
+      };
+      return map[code] || 'other';
+    },
+  },
+
+  // ---------- ST. PAUL (ArcGIS, single service, no geometry — date-filtered) ----------
+  {
+    id: 'stpaul',
+    name: 'St. Paul',
+    state: 'MN',
+    source: 'St. Paul Police Department',
+    type: 'arcgis',
+    bbox: { minLat: 44.88, maxLat: 44.99, minLon: -93.20, maxLon: -93.00 },
+    hasSpatialQuery: false, // no geometry on features — filter by date only
+    buildUrl: (_year, _lat, _lon, _radiusM) =>
+      'https://services1.arcgis.com/9meaaHE3uiba0zr8/arcgis/rest/services/Crime_Incident_Report_-_Dataset/FeatureServer/0/query',
+    buildParams: (_lat, _lon, _radiusM, year) => {
+      const startDate = `${year}-01-01`;
+      const endDate = `${year}-12-31`;
+      return {
+        where: `DATE >= '${startDate}' AND DATE <= '${endDate}' AND INCIDENT NOT LIKE '%Proactive Police Visit%'`,
+        outFields: 'INCIDENT,INCIDENT_TYPE,DATE,NEIGHBORHOOD_NAME,BLOCK',
+        resultRecordCount: 2000,
+        orderByFields: 'DATE DESC',
+        f: 'json',
+      };
+    },
+    parseFeatures: (data) => (data.features || []).map(f => f.attributes),
+    normalizeIncident: (inc) => ({
+      offenseCode: (inc.INCIDENT || '').toUpperCase(),
+      description: inc.INCIDENT_TYPE || inc.INCIDENT || '',
+      date: inc.DATE ? new Date(inc.DATE).toLocaleDateString() : null,
+      neighborhood: inc.NEIGHBORHOOD_NAME || null,
+      lat: null, lon: null,
+    }),
+    categorizeOffense: (code) => {
+      const c = code.toUpperCase();
+      if (/MURDER|HOMICIDE|RAPE|ROBBERY|ASSAULT|CSC|KIDNAP/.test(c)) return 'violent';
+      if (/BURGLARY|THEFT|AUTO THEFT|ARSON|VANDAL|FORG|FRAUD|SHOPLIFT/.test(c)) return 'property';
+      return 'other';
+    },
+  },
+
+  // ---------- CHICAGO (Socrata) ----------
+  {
+    id: 'chicago',
+    name: 'Chicago',
+    state: 'IL',
+    source: 'Chicago Police Department',
+    type: 'socrata',
+    bbox: { minLat: 41.64, maxLat: 42.03, minLon: -87.94, maxLon: -87.52 },
+    hasSpatialQuery: true,
+    endpoint: 'https://data.cityofchicago.org/resource/ijzp-q8t2.json',
+    buildSocrataQuery: (lat, lon, radiusM, year) =>
+      `$where=within_circle(location,${lat},${lon},${radiusM}) AND year='${year}'&$order=date DESC&$limit=500`,
+    normalizeIncident: (r) => ({
+      offenseCode: (r.primary_type || '').toUpperCase(),
+      description: `${r.primary_type || ''} - ${r.description || ''}`.trim(),
+      date: r.date ? new Date(r.date).toLocaleDateString() : null,
+      neighborhood: r.block || null,
+      lat: parseFloat(r.latitude) || null,
+      lon: parseFloat(r.longitude) || null,
+    }),
+    categorizeOffense: (code) => {
+      if (/HOMICIDE|ASSAULT|BATTERY|ROBBERY|SEX OFFENSE|CRIM SEXUAL|KIDNAPPING|HUMAN TRAFFICKING/.test(code)) return 'violent';
+      if (/BURGLARY|THEFT|MOTOR VEHICLE|ARSON|CRIMINAL DAMAGE|DECEPTIVE/.test(code)) return 'property';
+      return 'other';
+    },
+  },
+
+  // ---------- SAN FRANCISCO (Socrata) ----------
+  {
+    id: 'sf',
+    name: 'San Francisco',
+    state: 'CA',
+    source: 'SF Police Department',
+    type: 'socrata',
+    bbox: { minLat: 37.70, maxLat: 37.84, minLon: -122.52, maxLon: -122.35 },
+    hasSpatialQuery: true,
+    endpoint: 'https://data.sfgov.org/resource/wg3w-h783.json',
+    buildSocrataQuery: (lat, lon, radiusM, year) =>
+      `$where=within_circle(point,${lat},${lon},${radiusM}) AND incident_year='${year}'&$order=incident_date DESC&$limit=500`,
+    normalizeIncident: (r) => ({
+      offenseCode: (r.incident_category || '').toUpperCase(),
+      description: r.incident_subcategory || r.incident_category || '',
+      date: r.incident_date ? new Date(r.incident_date).toLocaleDateString() : null,
+      neighborhood: r.analysis_neighborhood || null,
+      lat: parseFloat(r.latitude) || null,
+      lon: parseFloat(r.longitude) || null,
+    }),
+    categorizeOffense: (code) => {
+      if (/ASSAULT|HOMICIDE|ROBBERY|SEX OFFENSE|RAPE|HUMAN TRAFFICKING|KIDNAPPING|WEAPONS/.test(code)) return 'violent';
+      if (/BURGLARY|LARCENY|THEFT|MOTOR VEHICLE|ARSON|VANDALISM|FRAUD|FORGERY/.test(code)) return 'property';
+      return 'other';
+    },
+  },
+
+  // ---------- NEW YORK CITY (Socrata) ----------
+  {
+    id: 'nyc',
+    name: 'New York City',
+    state: 'NY',
+    source: 'NYPD',
+    type: 'socrata',
+    bbox: { minLat: 40.49, maxLat: 40.92, minLon: -74.26, maxLon: -73.70 },
+    hasSpatialQuery: true,
+    endpoint: 'https://data.cityofnewyork.us/resource/5uac-w243.json',
+    buildSocrataQuery: (lat, lon, radiusM, year) =>
+      `$where=within_circle(lat_lon,${lat},${lon},${radiusM}) AND cmplnt_fr_dt>='${year}-01-01T00:00:00'&$order=cmplnt_fr_dt DESC&$limit=500`,
+    normalizeIncident: (r) => ({
+      offenseCode: (r.ofns_desc || '').toUpperCase(),
+      description: r.ofns_desc || r.pd_desc || '',
+      date: r.cmplnt_fr_dt ? new Date(r.cmplnt_fr_dt).toLocaleDateString() : null,
+      neighborhood: r.boro_nm || null,
+      lat: parseFloat(r.latitude) || null,
+      lon: parseFloat(r.longitude) || null,
+    }),
+    categorizeOffense: (code) => {
+      if (/MURDER|FELONY ASSAULT|ROBBERY|RAPE|SEX CRIMES|KIDNAPPING/.test(code)) return 'violent';
+      if (/BURGLARY|LARCENY|THEFT|VEHICLE|ARSON|CRIMINAL MISCHIEF|FRAUD|FORGERY/.test(code)) return 'property';
+      return 'other';
+    },
+  },
+
+  // ---------- LOS ANGELES (Socrata) ----------
+  {
+    id: 'la',
+    name: 'Los Angeles',
+    state: 'CA',
+    source: 'LAPD',
+    type: 'socrata',
+    bbox: { minLat: 33.70, maxLat: 34.34, minLon: -118.67, maxLon: -118.15 },
+    hasSpatialQuery: true,
+    endpoint: 'https://data.lacity.org/resource/2nrs-mtv8.json',
+    buildSocrataQuery: (lat, lon, radiusM, year) => {
+      // LA has separate lat/lon columns (no Socrata point column for within_circle)
+      const degOffset = (radiusM / 1609.34) / 69; // rough miles → degrees
+      const minLat = (lat - degOffset).toFixed(4);
+      const maxLat = (lat + degOffset).toFixed(4);
+      const minLon = (lon - degOffset).toFixed(4);
+      const maxLon = (lon + degOffset).toFixed(4);
+      return `$where=date_extract_y(date_occ)=${year} AND lat BETWEEN ${minLat} AND ${maxLat} AND lon BETWEEN ${minLon} AND ${maxLon}&$order=date_occ DESC&$limit=500`;
+    },
+    normalizeIncident: (r) => ({
+      offenseCode: (r.crm_cd_desc || '').toUpperCase(),
+      description: r.crm_cd_desc || '',
+      date: r.date_occ ? new Date(r.date_occ).toLocaleDateString() : null,
+      neighborhood: r.area_name || null,
+      lat: parseFloat(r.lat) || null,
+      lon: parseFloat(r.lon) || null,
+    }),
+    categorizeOffense: (code) => {
+      if (/MURDER|ASSAULT|ROBBERY|RAPE|SEX|KIDNAP|BATTERY|MANSLAUGHTER|HOMICIDE/.test(code)) return 'violent';
+      if (/BURGLARY|THEFT|STOLEN|VEHICLE|ARSON|VANDAL|FORGERY|FRAUD|SHOPLIFTING/.test(code)) return 'property';
+      return 'other';
+    },
+  },
+];
+
+/** Find which city (if any) covers the given coordinates. */
+function findCityForCoords(lat, lon) {
+  return CITY_CRIME_REGISTRY.find(c =>
+    lat >= c.bbox.minLat && lat <= c.bbox.maxLat &&
+    lon >= c.bbox.minLon && lon <= c.bbox.maxLon
+  ) || null;
+}
+
+/** Fetch incidents from an ArcGIS city config for a given year. */
+async function fetchArcGISCrime(city, lat, lon, radiusM, year) {
+  const url = city.buildUrl(year, lat, lon, radiusM);
+  const params = new URLSearchParams(city.buildParams(lat, lon, radiusM, year));
+  const res = await fetch(`${url}?${params}`, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return city.parseFeatures(data);
+}
+
+/** Fetch incidents from a Socrata city config for a given year. */
+async function fetchSocrataCrime(city, lat, lon, radiusM, year) {
+  const qs = city.buildSocrataQuery(lat, lon, radiusM, year);
+  const res = await fetch(`${city.endpoint}?${qs}`, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+/** Generic: fetch raw incidents from any supported city. */
+async function fetchCityIncidents(city, lat, lon, radiusM, year) {
+  if (city.type === 'arcgis') return fetchArcGISCrime(city, lat, lon, radiusM, year);
+  if (city.type === 'socrata') return fetchSocrataCrime(city, lat, lon, radiusM, year);
+  return [];
+}
+
+/** Categorize and summarize incidents using city-specific mappings. */
+function summarizeIncidents(city, rawIncidents) {
+  const cats = { violent: 0, property: 0, other: 0 };
+  const offenseCounts = {};
+  const normalized = [];
+
+  for (const raw of rawIncidents) {
+    const inc = city.normalizeIncident(raw);
+    const cat = city.categorizeOffense(inc.offenseCode);
+    cats[cat]++;
+    offenseCounts[inc.description] = (offenseCounts[inc.description] || 0) + 1;
+    normalized.push(inc);
+  }
+
+  return { cats, offenseCounts, normalized };
+}
 
 app.get('/api/crime/nearby', async (req, res) => {
   try {
@@ -1467,74 +1711,39 @@ app.get('/api/crime/nearby', async (req, res) => {
     const latF = parseFloat(lat);
     const lonF = parseFloat(lon);
     const radiusMiles = parseFloat(radius) || 0.5;
-    const radiusMeters = Math.min(radiusMiles, 2) * 1609.34; // cap at 2 miles
+    const radiusMeters = Math.min(radiusMiles, 2) * 1609.34;
 
-    // Check if coordinates are in Minneapolis metro area (rough bbox)
-    if (latF < 44.85 || latF > 45.10 || lonF < -93.45 || lonF > -93.15) {
-      return res.json({ available: false, reason: 'Outside Minneapolis coverage area' });
+    const city = findCityForCoords(latF, lonF);
+    if (!city) {
+      return res.json({ available: false, reason: 'No crime data coverage for this location' });
     }
 
-    const cacheKey = `mpls-crime:${latF.toFixed(3)},${lonF.toFixed(3)},${radiusMiles}`;
+    const cacheKey = `crime:${city.id}:${latF.toFixed(3)},${lonF.toFixed(3)},${radiusMiles}`;
     const cached = cacheGet(cacheKey);
     if (cached) return res.json({ ...cached, cached: true });
 
-    // Query current year + prior year for trend comparison
-    const currentYear = new Date().getFullYear();
-    const priorYear = currentYear - 1;
+    let currentYear = new Date().getFullYear();
+    let priorYear = currentYear - 1;
 
-    const geometryFilter = JSON.stringify({
-      x: lonF, y: latF, spatialReference: { wkid: 4326 }
-    });
-
-    const buildUrl = (year) => {
-      const params = new URLSearchParams({
-        where: '1=1',
-        geometry: geometryFilter,
-        geometryType: 'esriGeometryPoint',
-        spatialRel: 'esriSpatialRelIntersects',
-        distance: radiusMeters,
-        units: 'esriSRUnit_Meter',
-        inSR: 4326,
-        outFields: 'offense,description,reportedDate,centerLat,centerLong,neighborhood',
-        resultRecordCount: 500,
-        orderByFields: 'reportedDate DESC',
-        f: 'json',
-      });
-      return `${MPLS_CRIME_BASE}/Police_Incidents_${year}/FeatureServer/0/query?${params}`;
-    };
-
-    const [currentRes, priorRes] = await Promise.allSettled([
-      fetch(buildUrl(currentYear), { headers: { 'User-Agent': 'PropScout/1.0' } }),
-      fetch(buildUrl(priorYear), { headers: { 'User-Agent': 'PropScout/1.0' } }),
+    // Fetch current + prior year in parallel
+    let [currentRaw, priorRaw] = await Promise.all([
+      fetchCityIncidents(city, latF, lonF, radiusMeters, currentYear).catch(() => []),
+      fetchCityIncidents(city, latF, lonF, radiusMeters, priorYear).catch(() => []),
     ]);
 
-    const parseResponse = async (settled) => {
-      if (settled.status !== 'fulfilled') return [];
-      const r = settled.value;
-      if (!r.ok) return [];
-      const data = await r.json();
-      return (data.features || []).map(f => f.attributes);
-    };
+    // If current year has no data, try progressively older years (max 2 fallbacks)
+    for (let fallback = 0; fallback < 2 && currentRaw.length === 0; fallback++) {
+      currentYear = priorYear;
+      priorYear = currentYear - 1;
+      currentRaw = priorRaw.length > 0 ? priorRaw :
+        await fetchCityIncidents(city, latF, lonF, radiusMeters, currentYear).catch(() => []);
+      priorRaw = currentRaw.length > 0
+        ? await fetchCityIncidents(city, latF, lonF, radiusMeters, priorYear).catch(() => [])
+        : [];
+    }
 
-    const currentIncidents = await parseResponse(currentRes);
-    const priorIncidents = await parseResponse(priorRes);
-
-    // Categorize current year incidents
-    const categorize = (incidents) => {
-      const cats = { violent: 0, property: 0, other: 0 };
-      const offenseCounts = {};
-      for (const inc of incidents) {
-        const code = (inc.offense || '').toUpperCase();
-        const cat = MPLS_OFFENSE_CATEGORIES[code] || 'other';
-        cats[cat]++;
-        const desc = inc.description || code;
-        offenseCounts[desc] = (offenseCounts[desc] || 0) + 1;
-      }
-      return { cats, offenseCounts };
-    };
-
-    const current = categorize(currentIncidents);
-    const prior = categorize(priorIncidents);
+    const current = summarizeIncidents(city, currentRaw);
+    const prior = summarizeIncidents(city, priorRaw);
 
     // Top offenses
     const topOffenses = Object.entries(current.offenseCounts)
@@ -1543,37 +1752,47 @@ app.get('/api/crime/nearby', async (req, res) => {
       .map(([name, count]) => ({ name, count }));
 
     // Recent incidents (last 10)
-    const recentIncidents = currentIncidents.slice(0, 10).map(inc => ({
-      offense: inc.description || inc.offense,
-      date: inc.reportedDate ? new Date(inc.reportedDate).toLocaleDateString() : null,
+    const recentIncidents = current.normalized.slice(0, 10).map(inc => ({
+      offense: inc.description,
+      date: inc.date,
       neighborhood: inc.neighborhood,
-      lat: inc.centerLat,
-      lon: inc.centerLong,
+      lat: inc.lat,
+      lon: inc.lon,
     }));
 
-    // Year-over-year trend (normalize by months elapsed)
+    // Year-over-year trend (annualize partial year)
     const now = new Date();
     const monthsElapsed = now.getMonth() + (now.getDate() / 30);
-    const annualizedCurrent = monthsElapsed > 0 ? Math.round(currentIncidents.length * (12 / monthsElapsed)) : currentIncidents.length;
-    const changePercent = priorIncidents.length > 0
-      ? Math.round(((annualizedCurrent - priorIncidents.length) / priorIncidents.length) * 100)
+    const isPartialYear = currentYear === now.getFullYear() && monthsElapsed < 11;
+    const annualizedCurrent = isPartialYear && monthsElapsed > 0
+      ? Math.round(currentRaw.length * (12 / monthsElapsed))
+      : currentRaw.length;
+    // Don't compute YoY if either side likely hit a query limit (comparison is meaningless)
+    const resultsCapped = currentRaw.length >= 500 && currentRaw.length % 500 === 0 ||
+      priorRaw.length >= 500 && priorRaw.length % 500 === 0;
+    const changePercent = priorRaw.length > 0 && !resultsCapped
+      ? Math.round(((annualizedCurrent - priorRaw.length) / priorRaw.length) * 100)
       : null;
 
     const result = {
       available: true,
+      cityId: city.id,
+      cityName: city.name,
       lat: latF,
       lon: lonF,
       radiusMiles,
+      hasSpatialQuery: city.hasSpatialQuery,
       currentYear,
       priorYear,
-      totalCurrent: currentIncidents.length,
-      totalPrior: priorIncidents.length,
+      totalCurrent: currentRaw.length,
+      totalPrior: priorRaw.length,
       annualizedCurrent,
       changePercent,
+      resultsCapped,
       categories: current.cats,
       topOffenses,
       recentIncidents,
-      source: 'Minneapolis Police Department (ArcGIS)',
+      source: `${city.source} (${city.type === 'socrata' ? 'Socrata' : 'ArcGIS'})`,
     };
 
     cacheSet(cacheKey, result);
@@ -1581,6 +1800,14 @@ app.get('/api/crime/nearby', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+/** List supported cities for the crime nearby feature. */
+app.get('/api/crime/cities', (_req, res) => {
+  res.json(CITY_CRIME_REGISTRY.map(c => ({
+    id: c.id, name: c.name, state: c.state,
+    bbox: c.bbox, hasSpatialQuery: c.hasSpatialQuery,
+  })));
 });
 
 /** Demo momentum data when APIs are unavailable. */
