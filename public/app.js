@@ -1747,17 +1747,68 @@ async function fetchCrimeNearby(lat, lon) {
     // Update section header with city name
     const title = $('crime-nearby-title');
     const subtitle = $('crime-nearby-subtitle');
-    if (title) title.textContent = `${data.cityName || 'Local'} Crime — Nearby Incidents`;
-    if (subtitle) {
-      const spatialNote = data.hasSpatialQuery === false ? ' (city-wide, not radius-filtered)' : '';
-      subtitle.textContent = `Real-time incident data from ${data.source || 'local police'}${spatialNote}`;
-    }
 
-    renderCrimeNearby(data, content);
+    if (data.dataType === 'aggregate') {
+      if (title) title.textContent = `${data.cityName || 'Local'} — Crime Rates`;
+      if (subtitle) subtitle.textContent = `Annual crime rates from ${data.source || 'BCA'}`;
+      renderCrimeAggregate(data, content);
+    } else {
+      if (title) title.textContent = `${data.cityName || 'Local'} Crime — Nearby Incidents`;
+      if (subtitle) {
+        const spatialNote = data.hasSpatialQuery === false ? ' (city-wide, not radius-filtered)' : '';
+        subtitle.textContent = `Real-time incident data from ${data.source || 'local police'}${spatialNote}`;
+      }
+      renderCrimeNearby(data, content);
+    }
     section.classList.remove('hidden');
   } catch {
     section.classList.add('hidden');
   }
+}
+
+function renderCrimeAggregate(data, container) {
+  const levelClass = {
+    'Low': 'crime-down', 'Moderate': 'crime-flat', 'Elevated': 'crime-up', 'High': 'crime-up'
+  }[data.safetyLevel] || 'crime-flat';
+
+  // National average violent ~380, property ~1,950 per 100K
+  const vPct = Math.min(100, Math.round((data.violentRate / 500) * 100));
+  const pPct = Math.min(100, Math.round((data.propertyRate / 4000) * 100));
+
+  container.innerHTML = `
+    <div class="crime-overview">
+      <div class="crime-stat-card">
+        <div class="crime-big-number ${levelClass}">${data.safetyLevel}</div>
+        <div class="crime-stat-label">Crime Level (${data.year})</div>
+      </div>
+      <div class="crime-stat-card">
+        <div class="crime-big-number">${data.violentRate}</div>
+        <div class="crime-stat-label">Violent per 100K</div>
+      </div>
+      <div class="crime-stat-card">
+        <div class="crime-big-number">${data.propertyRate}</div>
+        <div class="crime-stat-label">Property per 100K</div>
+      </div>
+    </div>
+    <div class="crime-stat-card" style="margin-bottom:12px">
+      <div class="crime-category-bars">
+        <div class="cat-row">
+          <span class="cat-label">Violent</span>
+          <div class="cat-bar"><div class="cat-bar-fill violent" style="width:${vPct}%"></div></div>
+          <span class="cat-count">${data.violentRate}/100K</span>
+        </div>
+        <div class="cat-row">
+          <span class="cat-label">Property</span>
+          <div class="cat-bar"><div class="cat-bar-fill property" style="width:${pPct}%"></div></div>
+          <span class="cat-count">${data.propertyRate}/100K</span>
+        </div>
+      </div>
+    </div>
+    <div class="crime-source">
+      ${data.note || ''}<br>
+      Source: ${data.source} | Pop: ${(data.population || 0).toLocaleString()}
+    </div>
+  `;
 }
 
 function renderCrimeNearby(data, container) {
