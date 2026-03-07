@@ -973,6 +973,52 @@ select { cursor: pointer; appearance: none;
 }
 .btn-ai:hover { background: rgba(91,141,249,0.2); border-color: var(--accent); }
 
+/* ===== MINNEAPOLIS CRIME NEARBY ===== */
+.crime-nearby-section { margin-top: 24px; }
+.crime-overview {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px;
+}
+.crime-stat-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 16px; text-align: center;
+}
+.crime-big-number { font-size: 1.8rem; font-weight: 800; color: var(--text); }
+.crime-big-number.crime-up { color: var(--red); }
+.crime-big-number.crime-down { color: var(--green); }
+.crime-big-number.crime-flat { color: var(--yellow); }
+.crime-stat-label { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+.crime-category-bars { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.cat-row { display: flex; align-items: center; gap: 8px; }
+.cat-label { width: 60px; font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0; }
+.cat-bar { flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; }
+.cat-bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+.cat-bar-fill.violent { background: var(--red); }
+.cat-bar-fill.property { background: var(--yellow); }
+.cat-bar-fill.other { background: var(--accent); }
+.cat-count { font-size: 0.75rem; color: var(--text); min-width: 28px; text-align: right; }
+.crime-details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.crime-detail-card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 14px;
+}
+.crime-detail-card h4 { font-size: 0.85rem; font-weight: 700; margin-bottom: 10px; }
+.crime-offense-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 0.8rem;
+}
+.crime-offense-row:last-child { border-bottom: none; }
+.offense-name { color: var(--text); }
+.offense-count { font-weight: 700; color: var(--text-muted); }
+.crime-incident {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 0.78rem;
+}
+.crime-incident:last-child { border-bottom: none; }
+.incident-type { color: var(--text); font-weight: 500; }
+.incident-date { color: var(--text-muted); margin-left: auto; }
+.incident-hood { color: var(--text-dim); font-size: 0.72rem; width: 100%; }
+.crime-source { font-size: 0.72rem; color: var(--text-dim); text-align: right; margin-top: 4px; }
+
 @media (max-width: 640px) {
   .header-inner { gap: 8px; padding: 0 12px; }
   .tab-btn span:not(.sr-only) { display: none; }
@@ -983,4 +1029,6 @@ select { cursor: pointer; appearance: none;
   .scan-summary { grid-template-columns: 1fr 1fr; }
   .verdict-strategy { grid-template-columns: 1fr; }
   .nl-search-bar { flex-wrap: wrap; }
+  .crime-overview { grid-template-columns: 1fr; }
+  .crime-details-grid { grid-template-columns: 1fr; }
 }

@@ -1445,6 +1445,144 @@ app.get('/api/momentum', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// MINNEAPOLIS NEARBY CRIME (ArcGIS FeatureServer — free, no key)
+// ===========================================================================
+const MPLS_CRIME_BASE = 'https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services';
+const MPLS_OFFENSE_CATEGORIES = {
+  MURDR: 'violent', RAPE: 'violent', ROBBRY: 'violent', ASLT: 'violent',
+  CSCR: 'violent', KIDNAP: 'violent', HMCDE: 'violent',
+  BURGD: 'property', BURGO: 'property', THEFT: 'property', AUTOTH: 'property',
+  TMVP: 'property', SHOPLF: 'property', ARSN: 'property', VANDAL: 'property',
+  FORGE: 'property', FRAUD: 'property', STOLP: 'property',
+  NARCO: 'other', DUI: 'other', DWEAP: 'other', DSORD: 'other',
+  PRST: 'other', LIQUOR: 'other', TRSPS: 'other', WEAPN: 'other',
+};
+
+app.get('/api/crime/nearby', async (req, res) => {
+  try {
+    const { lat, lon, radius } = req.query;
+    if (!lat || !lon) return res.status(400).json({ error: 'Missing lat/lon' });
+
+    const latF = parseFloat(lat);
+    const lonF = parseFloat(lon);
+    const radiusMiles = parseFloat(radius) || 0.5;
+    const radiusMeters = Math.min(radiusMiles, 2) * 1609.34; // cap at 2 miles
+
+    // Check if coordinates are in Minneapolis metro area (rough bbox)
+    if (latF < 44.85 || latF > 45.10 || lonF < -93.45 || lonF > -93.15) {
+      return res.json({ available: false, reason: 'Outside Minneapolis coverage area' });
+    }
+
+    const cacheKey = `mpls-crime:${latF.toFixed(3)},${lonF.toFixed(3)},${radiusMiles}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) return res.json({ ...cached, cached: true });
+
+    // Query current year + prior year for trend comparison
+    const currentYear = new Date().getFullYear();
+    const priorYear = currentYear - 1;
+
+    const geometryFilter = JSON.stringify({
+      x: lonF, y: latF, spatialReference: { wkid: 4326 }
+    });
+
+    const buildUrl = (year) => {
+      const params = new URLSearchParams({
+        where: '1=1',
+        geometry: geometryFilter,
+        geometryType: 'esriGeometryPoint',
+        spatialRel: 'esriSpatialRelIntersects',
+        distance: radiusMeters,
+        units: 'esriSRUnit_Meter',
+        inSR: 4326,
+        outFields: 'offense,description,reportedDate,centerLat,centerLong,neighborhood',
+        resultRecordCount: 500,
+        orderByFields: 'reportedDate DESC',
+        f: 'json',
+      });
+      return `${MPLS_CRIME_BASE}/Police_Incidents_${year}/FeatureServer/0/query?${params}`;
+    };
+
+    const [currentRes, priorRes] = await Promise.allSettled([
+      fetch(buildUrl(currentYear), { headers: { 'User-Agent': 'PropScout/1.0' } }),
+      fetch(buildUrl(priorYear), { headers: { 'User-Agent': 'PropScout/1.0' } }),
+    ]);
+
+    const parseResponse = async (settled) => {
+      if (settled.status !== 'fulfilled') return [];
+      const r = settled.value;
+      if (!r.ok) return [];
+      const data = await r.json();
+      return (data.features || []).map(f => f.attributes);
+    };
+
+    const currentIncidents = await parseResponse(currentRes);
+    const priorIncidents = await parseResponse(priorRes);
+
+    // Categorize current year incidents
+    const categorize = (incidents) => {
+      const cats = { violent: 0, property: 0, other: 0 };
+      const offenseCounts = {};
+      for (const inc of incidents) {
+        const code = (inc.offense || '').toUpperCase();
+        const cat = MPLS_OFFENSE_CATEGORIES[code] || 'other';
+        cats[cat]++;
+        const desc = inc.description || code;
+        offenseCounts[desc] = (offenseCounts[desc] || 0) + 1;
+      }
+      return { cats, offenseCounts };
+    };
+
+    const current = categorize(currentIncidents);
+    const prior = categorize(priorIncidents);
+
+    // Top offenses
+    const topOffenses = Object.entries(current.offenseCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([name, count]) => ({ name, count }));
+
+    // Recent incidents (last 10)
+    const recentIncidents = currentIncidents.slice(0, 10).map(inc => ({
+      offense: inc.description || inc.offense,
+      date: inc.reportedDate ? new Date(inc.reportedDate).toLocaleDateString() : null,
+      neighborhood: inc.neighborhood,
+      lat: inc.centerLat,
+      lon: inc.centerLong,
+    }));
+
+    // Year-over-year trend (normalize by months elapsed)
+    const now = new Date();
+    const monthsElapsed = now.getMonth() + (now.getDate() / 30);
+    const annualizedCurrent = monthsElapsed > 0 ? Math.round(currentIncidents.length * (12 / monthsElapsed)) : currentIncidents.length;
+    const changePercent = priorIncidents.length > 0
+      ? Math.round(((annualizedCurrent - priorIncidents.length) / priorIncidents.length) * 100)
+      : null;
+
+    const result = {
+      available: true,
+      lat: latF,
+      lon: lonF,
+      radiusMiles,
+      currentYear,
+      priorYear,
+      totalCurrent: currentIncidents.length,
+      totalPrior: priorIncidents.length,
+      annualizedCurrent,
+      changePercent,
+      categories: current.cats,
+      topOffenses,
+      recentIncidents,
+      source: 'Minneapolis Police Department (ArcGIS)',
+    };
+
+    cacheSet(cacheKey, result);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /** Demo momentum data when APIs are unavailable. */
 function getDemoMomentum() {
   const factors = [

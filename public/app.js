@@ -1547,6 +1547,10 @@ async function performMomentum(zipCode, stateAbbr) {
     hide('momentum-loading');
     show('momentum-results');
 
+    // Fetch Minneapolis crime data if we have coordinates
+    if (lat && lon) fetchCrimeNearby(lat, lon);
+    else $('crime-nearby-section')?.classList.add('hidden');
+
     // Show Market Brief button and store zip for it
     state.lastMomentumZip = zipCode;
     const briefBtn = $('market-brief-btn');
@@ -1721,6 +1725,112 @@ function renderMomentumScore(data) {
     ${data.errors?.length ? `<br><strong>Warnings:</strong> ${data.errors.join('; ')}` : ''}
     <br><em>Trend arrows indicate real year-over-year directional data, not score-based estimates.</em>
   `;
+}
+
+// ---------------------------------------------------------------------------
+// MINNEAPOLIS CRIME NEARBY
+// ---------------------------------------------------------------------------
+async function fetchCrimeNearby(lat, lon) {
+  const section = $('crime-nearby-section');
+  const content = $('crime-nearby-content');
+  if (!section || !content) return;
+
+  try {
+    const res = await fetch(`/api/crime/nearby?lat=${lat}&lon=${lon}&radius=0.5`);
+    const data = await res.json();
+
+    if (!data.available) {
+      section.classList.add('hidden');
+      return;
+    }
+
+    renderCrimeNearby(data, content);
+    section.classList.remove('hidden');
+  } catch {
+    section.classList.add('hidden');
+  }
+}
+
+function renderCrimeNearby(data, container) {
+  const cats = data.categories || {};
+  const total = data.totalCurrent || 0;
+  const changePct = data.changePercent;
+  const changeClass = changePct > 0 ? 'crime-up' : changePct < 0 ? 'crime-down' : 'crime-flat';
+  const changeStr = changePct != null
+    ? `${changePct > 0 ? '+' : ''}${changePct}%`
+    : 'N/A';
+  const changeLabel = changePct != null
+    ? `vs ${data.priorYear} (annualized)`
+    : '';
+
+  // Top offenses
+  const topHtml = (data.topOffenses || []).map(o =>
+    `<div class="crime-offense-row">
+      <span class="offense-name">${escapeHtml(o.name)}</span>
+      <span class="offense-count">${o.count}</span>
+    </div>`
+  ).join('');
+
+  // Recent incidents
+  const recentHtml = (data.recentIncidents || []).slice(0, 8).map(inc =>
+    `<div class="crime-incident">
+      <span class="incident-type">${escapeHtml(inc.offense || '--')}</span>
+      <span class="incident-date">${inc.date || ''}</span>
+      ${inc.neighborhood ? `<span class="incident-hood">${escapeHtml(inc.neighborhood)}</span>` : ''}
+    </div>`
+  ).join('');
+
+  const cachedNote = data.cached ? ' (cached)' : '';
+
+  container.innerHTML = `
+    <div class="crime-overview">
+      <div class="crime-stat-card crime-total">
+        <div class="crime-big-number">${total}</div>
+        <div class="crime-stat-label">Incidents in ${data.currentYear} (0.5 mi)</div>
+      </div>
+      <div class="crime-stat-card crime-trend">
+        <div class="crime-big-number ${changeClass}">${changeStr}</div>
+        <div class="crime-stat-label">${changeLabel}</div>
+      </div>
+      <div class="crime-stat-card">
+        <div class="crime-category-bars">
+          <div class="cat-row">
+            <span class="cat-label">Violent</span>
+            <div class="cat-bar"><div class="cat-bar-fill violent" style="width:${total ? Math.round((cats.violent / total) * 100) : 0}%"></div></div>
+            <span class="cat-count">${cats.violent || 0}</span>
+          </div>
+          <div class="cat-row">
+            <span class="cat-label">Property</span>
+            <div class="cat-bar"><div class="cat-bar-fill property" style="width:${total ? Math.round((cats.property / total) * 100) : 0}%"></div></div>
+            <span class="cat-count">${cats.property || 0}</span>
+          </div>
+          <div class="cat-row">
+            <span class="cat-label">Other</span>
+            <div class="cat-bar"><div class="cat-bar-fill other" style="width:${total ? Math.round((cats.other / total) * 100) : 0}%"></div></div>
+            <span class="cat-count">${cats.other || 0}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="crime-details-grid">
+      <div class="crime-detail-card">
+        <h4>Top Offenses</h4>
+        ${topHtml || '<p class="text-muted">No data</p>'}
+      </div>
+      <div class="crime-detail-card">
+        <h4>Recent Incidents</h4>
+        ${recentHtml || '<p class="text-muted">No recent incidents</p>'}
+      </div>
+    </div>
+    <div class="crime-source">Source: ${data.source || 'Minneapolis PD'}${cachedNote}</div>
+  `;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
 }
 
 // ---------------------------------------------------------------------------
