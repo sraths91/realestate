@@ -27,6 +27,32 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
+// US state name → abbreviation lookup
+// ---------------------------------------------------------------------------
+const STATE_ABBR_MAP = {
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA',
+  'colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA',
+  'hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS',
+  'kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD','massachusetts':'MA',
+  'michigan':'MI','minnesota':'MN','mississippi':'MS','missouri':'MO','montana':'MT',
+  'nebraska':'NE','nevada':'NV','new hampshire':'NH','new jersey':'NJ','new mexico':'NM',
+  'new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK',
+  'oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC',
+  'south dakota':'SD','tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT',
+  'virginia':'VA','washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
+  'district of columbia':'DC',
+};
+
+/** Convert full state name or abbreviation to 2-letter abbreviation */
+function stateNameToAbbr(name) {
+  if (!name) return '';
+  const s = name.trim();
+  // Already a 2-letter abbreviation
+  if (/^[A-Z]{2}$/.test(s)) return s;
+  return STATE_ABBR_MAP[s.toLowerCase()] || '';
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', () => {
@@ -1490,10 +1516,13 @@ async function performMomentum(zipCode, stateAbbr) {
     if (geoData.length) {
       lat = parseFloat(geoData[0].lat);
       lon = parseFloat(geoData[0].lon);
-      // Auto-detect state if not provided
+      // Auto-detect state from Nominatim display_name
+      // Format: "78701, Austin, Travis County, Texas, United States"
       if (!stateAbbr) {
-        const parts = geoData[0].display_name.split(', ');
-        stateAbbr = parts[parts.length - 3] || '';
+        const parts = geoData[0].display_name.split(', ').map(p => p.trim());
+        // State is 2nd-from-last (before "United States")
+        const statePart = parts[parts.length - 2] || '';
+        stateAbbr = stateNameToAbbr(statePart);
       }
     }
   } catch { /* ignore */ }

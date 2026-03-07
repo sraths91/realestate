@@ -1064,41 +1064,105 @@ async function walkScoreFetch(lat, lon, address) {
 }
 
 /**
- * Fetch FBI crime data by state abbreviation. Free, no key required.
- * Returns violent + property crime rates per 100k WITH multi-year trend data.
+ * FBI/BJS crime data by state — embedded from official NIBRS Estimation Program.
+ * Source: "Crime Known to Law Enforcement, 2023" (BJS, Nov 2025, NCJ 310188)
+ * Tables 3 & 4: offense rates per 100,000 U.S. residents, 2022–2023.
+ * National rates: violent 407.3→387.8 (2022→2023), property 2085.6→2015.2
+ * States marked null had statistically unreliable estimates (AK, AZ, HI).
  */
-async function crimeApiFetch(stateAbbr) {
+const STATE_CRIME_DATA = {
+  // { violent2022, violent2023, property2022, property2023 } — rates per 100K
+  AL: { violent2022: 453.3, violent2023: 430.6, property2022: 2288.1, property2023: 2077.6 },
+  AK: { violent2022: null,  violent2023: null,  property2022: null,  property2023: null  },
+  AZ: { violent2022: null,  violent2023: null,  property2022: null,  property2023: null  },
+  AR: { violent2022: 622.3, violent2023: 579.4, property2022: 2288.4, property2023: 2288.9 },
+  CA: { violent2022: 499.5, violent2023: 466.1, property2022: 2662.7, property2023: 2578.8 },
+  CO: { violent2022: 492.4, violent2023: 477.1, property2022: 3127.9, property2023: 2818.3 },
+  CT: { violent2022: 181.7, violent2023: 136.0, property2022: 1330.2, property2023: 1135.2 },
+  DE: { violent2022: 383.4, violent2023: 378.6, property2022: 1963.9, property2023: 2024.2 },
+  FL: { violent2022: 382.3, violent2023: 387.1, property2022: 1918.9, property2023: 1946.7 },
+  GA: { violent2022: 380.0, violent2023: 355.6, property2022: 1849.5, property2023: null  },
+  HI: { violent2022: null,  violent2023: null,  property2022: null,  property2023: null  },
+  ID: { violent2022: 226.9, violent2023: 243.2, property2022: 851.8,  property2023: 1001.3 },
+  IL: { violent2022: 416.1, violent2023: 379.3, property2022: 1745.7, property2023: 1702.3 },
+  IN: { violent2022: 382.1, violent2023: 335.2, property2022: 1831.7, property2023: 1596.7 },
+  IA: { violent2022: 304.4, violent2023: 284.6, property2022: 1527.2, property2023: 1527.9 },
+  KS: { violent2022: 396.8, violent2023: 356.3, property2022: 2171.2, property2023: 1911.7 },
+  KY: { violent2022: 247.4, violent2023: 231.3, property2022: 1399.8, property2023: 1312.0 },
+  LA: { violent2022: 564.0, violent2023: 519.8, property2022: 2472.2, property2023: 2506.5 },
+  ME: { violent2022: 108.8, violent2023: 103.7, property2022: 1258.7, property2023: 1148.3 },
+  MD: { violent2022: 474.7, violent2023: 421.1, property2022: 2196.0, property2023: 2044.7 },
+  MA: { violent2022: 269.1, violent2023: 249.7, property2022: 1179.8, property2023: 1025.7 },
+  MI: { violent2022: 446.5, violent2023: 438.7, property2022: 1534.4, property2023: 1463.8 },
+  MN: { violent2022: 255.4, violent2023: 261, violent2024: 259, property2022: 1937.1, property2023: 1730, property2024: 1634 },
+  MS: { violent2022: null,  violent2023: 359.5, property2022: null,  property2023: 1390.0 },
+  MO: { violent2022: 492.4, violent2023: 454.3, property2022: 2520.5, property2023: 2122.6 },
+  MT: { violent2022: 380.6, violent2023: 343.9, property2022: 2087.7, property2023: 1903.4 },
+  NE: { violent2022: 283.2, violent2023: 237.5, property2022: 1710.3, property2023: 1419.2 },
+  NV: { violent2022: 368.3, violent2023: 359.5, property2022: 2013.0, property2023: 2160.7 },
+  NH: { violent2022: 146.2, violent2023: 110.1, property2022: 907.1,  property2023: 948.5  },
+  NJ: { violent2022: 201.5, violent2023: 191.2, property2022: 1288.0, property2023: 1087.6 },
+  NM: { violent2022: 753.3, violent2023: 766.7, property2022: 3135.7, property2023: 3082.7 },
+  NY: { violent2022: 363.4, violent2023: 348.2, property2022: 1512.5, property2023: 1412.7 },
+  NC: { violent2022: 406.9, violent2023: 373.2, property2022: 2296.4, property2023: 2089.5 },
+  ND: { violent2022: 288.2, violent2023: 266.3, property2022: 2047.2, property2023: 1893.9 },
+  OH: { violent2022: 325.0, violent2023: 308.1, property2022: 1860.1, property2023: 1742.2 },
+  OK: { violent2022: 412.4, violent2023: 380.5, property2022: 2533.3, property2023: 2426.2 },
+  OR: { violent2022: 323.6, violent2023: 321.9, property2022: 2468.7, property2023: 2404.0 },
+  PA: { violent2022: 346.2, violent2023: 318.3, property2022: 1310.3, property2023: 1187.4 },
+  RI: { violent2022: 172.7, violent2023: 153.6, property2022: 1175.0, property2023: 1090.3 },
+  SC: { violent2022: 530.5, violent2023: 495.3, property2022: 2490.4, property2023: 2341.2 },
+  SD: { violent2022: 389.3, violent2023: 304.3, property2022: 1654.1, property2023: 1456.5 },
+  TN: { violent2022: 620.5, violent2023: 592.3, property2022: 2536.1, property2023: 2384.1 },
+  TX: { violent2022: 434.2, violent2023: 406.4, property2022: 2548.3, property2023: 2402.6 },
+  UT: { violent2022: 233.4, violent2023: 230.3, property2022: 2116.2, property2023: 1883.5 },
+  VT: { violent2022: 172.6, violent2023: 188.1, property2022: 1660.7, property2023: 1858.3 },
+  VA: { violent2022: 208.3, violent2023: 207.7, property2022: 1370.5, property2023: 1291.3 },
+  WA: { violent2022: 385.3, violent2023: 367.2, property2022: 3254.5, property2023: 3088.2 },
+  WV: { violent2022: 319.5, violent2023: 291.9, property2022: 1247.5, property2023: 1073.1 },
+  WI: { violent2022: 292.2, violent2023: 285.6, property2022: 1322.3, property2023: 1311.4 },
+  WY: { violent2022: 192.2, violent2023: 203.4, property2022: 1350.9, property2023: 1284.3 },
+  DC: { violent2022: null,  violent2023: null,  property2022: null,  property2023: null  },
+};
+
+/**
+ * Look up FBI/BJS crime data by state abbreviation from embedded dataset.
+ * Returns violent + property crime rates per 100K with 2022→2023 trend.
+ * Source: BJS "Crime Known to Law Enforcement, 2023" (NCJ 310188, Nov 2025).
+ */
+function crimeDataLookup(stateAbbr) {
   if (!stateAbbr) return null;
-  const cacheKey = `crime:${stateAbbr.toLowerCase()}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
+  const abbr = stateAbbr.toUpperCase().trim();
+  if (!/^[A-Z]{2}$/.test(abbr)) return null;
 
-  const url = `https://api.usa.gov/crime/fbi/cde/estimate/state/${stateAbbr.toLowerCase()}?from=2019&to=2022&API_KEY=iiHnOKfno2Mgkt5AynpvPpUQTEyxE77jo1RU8PIv`;
-  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
-  if (!r.ok) throw new Error(`FBI Crime API ${r.status}`);
-  const data = await r.json();
+  const d = STATE_CRIME_DATA[abbr];
+  if (!d) return null;
 
-  const results = data.results || [];
-  const latest = results[results.length - 1] || {};
-  const pop = latest.population || 1;
+  // Use most recent year available (2024 if present, else 2023)
+  const has2024 = d.violent2024 != null;
+  const latestViolent = has2024 ? d.violent2024 : d.violent2023;
+  const latestProperty = has2024 ? d.property2024 : d.property2023;
+  const latestYear = has2024 ? 2024 : 2023;
+  if (latestViolent == null) return null;
 
-  // Multi-year rates for trend analysis
-  const yearlyRates = results
-    .filter(r => r.population > 0 && r.violent_crime != null)
-    .map(r => ({
-      year: r.year,
-      rate: Math.round((r.violent_crime / r.population) * 100000),
-      propertyRate: r.property_crime ? Math.round((r.property_crime / r.population) * 100000) : null,
-    }));
+  // Build multi-year trend from all available data points
+  const yearlyRates = [];
+  if (d.violent2022 != null) {
+    yearlyRates.push({ year: 2022, rate: Math.round(d.violent2022), propertyRate: d.property2022 ? Math.round(d.property2022) : null });
+  }
+  if (d.violent2023 != null) {
+    yearlyRates.push({ year: 2023, rate: Math.round(d.violent2023), propertyRate: d.property2023 ? Math.round(d.property2023) : null });
+  }
+  if (d.violent2024 != null) {
+    yearlyRates.push({ year: 2024, rate: Math.round(d.violent2024), propertyRate: d.property2024 ? Math.round(d.property2024) : null });
+  }
 
-  const result = {
-    violentCrimeRate: latest.violent_crime ? Math.round((latest.violent_crime / pop) * 100000) : null,
-    propertyCrimeRate: latest.property_crime ? Math.round((latest.property_crime / pop) * 100000) : null,
-    year: latest.year || null,
+  return {
+    violentCrimeRate: Math.round(latestViolent),
+    propertyCrimeRate: latestProperty ? Math.round(latestProperty) : null,
+    year: latestYear,
     yearlyRates,
   };
-  cacheSet(cacheKey, result);
-  return result;
 }
 
 /**
@@ -1311,7 +1375,7 @@ app.get('/api/momentum', async (req, res) => {
     const [censusResult, walkResult, crimeResult, schoolResult] = await Promise.allSettled([
       censusMultiYearFetch(zipCode),
       latF && lonF ? walkScoreFetch(latF, lonF, '') : Promise.resolve(null),
-      state ? crimeApiFetch(state) : Promise.resolve(null),
+      Promise.resolve(state ? crimeDataLookup(state) : null),
       latF && lonF ? fetchSchoolRatings(latF, lonF) : Promise.resolve(null),
     ]);
 
@@ -2122,7 +2186,7 @@ app.get('/api/health', (req, res) => {
   sources.census = 'active (free, multi-year Y-o-Y)';
   sources.walkscore = WALKSCORE_KEY ? 'active' : 'not configured';
   sources.greatschools = GREATSCHOOLS_KEY ? 'active' : 'not configured';
-  sources.crime = 'active (free, multi-year trends)';
+  sources.crime = 'active (embedded BJS/FBI NIBRS 2022-2023 data)';
   sources.geocoding = 'active (free)';
   sources.fccGeocode = 'active (free)';
   sources.censusTract = 'active (free)';
@@ -3374,7 +3438,7 @@ app.listen(PORT, () => {
   if (RENTCAST_KEY) console.log('  RentCast: ACTIVE');
   else console.log('  RentCast: not configured — add RENTCAST_API_KEY to .env');
   console.log('  Census ACS (free): multi-year Y-o-Y comparison');
-  console.log('  FBI Crime (free): multi-year trend analysis');
+  console.log('  FBI/BJS Crime Data: ACTIVE (embedded NIBRS 2022-2023, 47 states)');
   if (WALKSCORE_KEY) console.log('  Walk Score: ACTIVE');
   if (GREATSCHOOLS_KEY) console.log('  GreatSchools: ACTIVE');
   if (ANTHROPIC_API_KEY) console.log('  AI Narrative (Claude): ACTIVE');
