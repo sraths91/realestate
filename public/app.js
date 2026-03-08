@@ -467,17 +467,16 @@ async function performSearch(address) {
 
     // Build valuation object from whatever source provided
     let valuation = null;
-    if (source === 'zillow') {
-      const estimate = property.zestimate || property.price;
-      if (estimate) {
-        valuation = {
-          price: estimate,
-          priceRangeLow: Math.round(estimate * 0.95),
-          priceRangeHigh: Math.round(estimate * 1.05),
-          rentEstimate: property.rentZestimate || null,
-          comparables: [],
-        };
-      }
+    const estimate = property.zestimate || property.price;
+    if (estimate) {
+      valuation = {
+        price: estimate,
+        priceRangeLow: Math.round(estimate * 0.95),
+        priceRangeHigh: Math.round(estimate * 1.05),
+        rentEstimate: property.rentZestimate || null,
+        comparables: data.valuation?.comparables || [],
+        mortgage: property.mortgage || null,
+      };
     } else if (data.valuation) {
       valuation = {
         price: data.valuation.price,
