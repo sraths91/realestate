@@ -1709,6 +1709,39 @@ function renderMomentumScore(data) {
     grid.appendChild(card);
   });
 
+  // === Nearby Schools Detail (SchoolDigger individual schools) ===
+  const schoolSection = $('schools-detail-section');
+  const schoolContent = $('schools-detail-content');
+  const schoolData = data.rawData?.schools;
+  if (schoolSection && schoolContent && schoolData?.schools?.length) {
+    const subtitle = $('schools-detail-subtitle');
+    if (subtitle) subtitle.textContent = `${schoolData.source} • ${schoolData.schoolCount} schools within 5 miles`;
+    schoolContent.innerHTML = schoolData.schools.map(s => {
+      const stars = '★'.repeat(Math.round(s.rating)) + '☆'.repeat(5 - Math.round(s.rating));
+      const rankBadge = s.rankPct != null
+        ? `<span class="school-rank ${s.rankPct >= 75 ? 'rank-high' : s.rankPct >= 50 ? 'rank-mid' : 'rank-low'}">Top ${100 - s.rankPct}%</span>`
+        : '';
+      const levelBadge = s.level ? `<span class="school-level">${s.level}</span>` : '';
+      return `
+        <div class="school-card">
+          <div class="school-card-header">
+            <span class="school-name">${s.name}</span>
+            ${levelBadge}
+          </div>
+          <div class="school-card-body">
+            <span class="school-stars">${stars}</span>
+            <span class="school-rating">${s.rating}/5</span>
+            ${rankBadge}
+          </div>
+          ${s.distance != null ? `<div class="school-distance">${s.distance.toFixed(1)} mi away</div>` : ''}
+        </div>
+      `;
+    }).join('');
+    schoolSection.classList.remove('hidden');
+  } else if (schoolSection) {
+    schoolSection.classList.add('hidden');
+  }
+
   // === Data sources ===
   const meta = $('momentum-meta');
   const sources = data.dataSources || [];
@@ -1716,7 +1749,7 @@ function renderMomentumScore(data) {
   if (data.rawData?.censusTrends) sources.push('Census Y-o-Y');
   if (data.rawData?.walkScore) sources.push('Walk Score');
   if (data.rawData?.crime) sources.push('FBI Crime');
-  if (data.rawData?.schools) sources.push('GreatSchools');
+  if (data.rawData?.schools) sources.push(data.rawData.schools.source || 'Schools');
   if (data.demo) sources.push('Demo Data');
   const uniqueSources = [...new Set(sources)];
 

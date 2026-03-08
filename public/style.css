@@ -1081,4 +1081,73 @@ select { cursor: pointer; appearance: none;
   .nl-search-bar { flex-wrap: wrap; }
   .crime-overview { grid-template-columns: 1fr; }
   .crime-details-grid { grid-template-columns: 1fr; }
+  .schools-detail-grid { grid-template-columns: 1fr !important; }
+}
+
+/* ==================== Nearby Schools Detail ==================== */
+.schools-detail-section { margin-top: 20px; }
+.schools-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.school-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  transition: border-color 0.2s;
+}
+.school-card:hover { border-color: var(--accent); }
+.school-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.school-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--text);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.school-level {
+  font-size: 0.7rem;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+.school-card-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.school-stars {
+  color: #f59e0b;
+  font-size: 0.85rem;
+  letter-spacing: 1px;
+}
+.school-rating {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.school-rank {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+.school-rank.rank-high { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+.school-rank.rank-mid { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.school-rank.rank-low { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.school-distance {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 6px;
 }

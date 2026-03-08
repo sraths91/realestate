@@ -13,6 +13,8 @@ const RENTCAST_KEY = process.env.RENTCAST_API_KEY;
 const WALKSCORE_KEY = process.env.WALKSCORE_API_KEY;
 const RENTCAST_BASE = 'https://api.rentcast.io/v1';
 const GREATSCHOOLS_KEY = process.env.GREATSCHOOLS_API_KEY;
+const SCHOOLDIGGER_APP_ID = process.env.SCHOOLDIGGER_APP_ID;
+const SCHOOLDIGGER_API_KEY = process.env.SCHOOLDIGGER_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -185,6 +187,13 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     expires_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS api_cache (
+    cache_key TEXT PRIMARY KEY,
+    data_json TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL
+  );
 `);
 
 // Extend portfolios table for client tracking (safe ALTER, ignore if already exists)
@@ -238,6 +247,46 @@ function cacheSet(key, data) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Persistent SQLite cache — survives Railway redeploys (for rate-limited APIs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Get from SQLite-backed cache. Returns null if expired or missing.
+ * @param {string} key
+ * @returns {*|null}
+ */
+function dbCacheGet(key) {
+  try {
+    const row = db.prepare(
+      "SELECT data_json FROM api_cache WHERE cache_key = ? AND expires_at > datetime('now')"
+    ).get(key);
+    return row ? JSON.parse(row.data_json) : null;
+  } catch { return null; }
+}
+
+/**
+ * Write to SQLite-backed cache with configurable TTL.
+ * @param {string} key
+ * @param {*} data
+ * @param {string} [ttl='7 days'] - SQLite date modifier (e.g. '24 hours', '7 days')
+ */
+function dbCacheSet(key, data, ttl = '7 days') {
+  try {
+    db.prepare(
+      "INSERT OR REPLACE INTO api_cache (cache_key, data_json, expires_at) VALUES (?, ?, datetime('now', ?))"
+    ).run(key, JSON.stringify(data), '+' + ttl);
+  } catch (err) {
+    console.log('dbCacheSet error:', err.message);
+  }
+}
+
+// Cleanup expired api_cache entries on startup
+try {
+  const cleaned = db.prepare("DELETE FROM api_cache WHERE expires_at < datetime('now')").run();
+  if (cleaned.changes > 0) console.log(`Cleaned up ${cleaned.changes} expired API cache entries`);
+} catch { /* ignore on first run */ }
 
 // ===========================================================================
 // SHARED AI HELPER — Claude → OpenAI → Gemini → Groq with SQLite cache
@@ -390,19 +439,41 @@ async function zillowApiFetch(endpoint, params = {}) {
 }
 
 /**
- * Fetch from RapidAPI Realty-in-US (Realtor.com) endpoint.
- * Host: realtor.p.rapidapi.com
+ * Fetch from RapidAPI Realty-in-US endpoint (GET with query params).
+ * Host: realty-in-us.p.rapidapi.com
  */
-async function realtorApiFetch(endpoint, params = {}) {
-  const url = new URL(`https://realtor.p.rapidapi.com${endpoint}`);
+async function realtorApiGet(endpoint, params = {}) {
+  const url = new URL(`https://realty-in-us.p.rapidapi.com${endpoint}`);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
   }
   const r = await fetch(url.toString(), {
     headers: {
       'X-RapidAPI-Key': RAPIDAPI_KEY,
-      'X-RapidAPI-Host': 'realtor.p.rapidapi.com',
+      'X-RapidAPI-Host': 'realty-in-us.p.rapidapi.com',
     },
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`Realtor API ${r.status}: ${text.slice(0, 200)}`);
+  }
+  return r.json();
+}
+
+/**
+ * Fetch from RapidAPI Realty-in-US endpoint (POST with JSON body).
+ * Host: realty-in-us.p.rapidapi.com
+ */
+async function realtorApiPost(endpoint, body = {}) {
+  const url = `https://realty-in-us.p.rapidapi.com${endpoint}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-RapidAPI-Key': RAPIDAPI_KEY,
+      'X-RapidAPI-Host': 'realty-in-us.p.rapidapi.com',
+    },
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const text = await r.text();
@@ -442,6 +513,12 @@ async function lookupProperty(address) {
   const cacheKey = `lookup:${address.toLowerCase().trim()}`;
   const cached = cacheGet(cacheKey);
   if (cached) return { ...cached, cached: true };
+  // Check persistent SQLite cache (survives redeploys)
+  const dbCached = dbCacheGet(cacheKey);
+  if (dbCached) {
+    cacheSet(cacheKey, dbCached); // warm in-memory
+    return { ...dbCached, cached: true };
+  }
 
   let result = null;
 
@@ -497,22 +574,20 @@ async function lookupProperty(address) {
       }
     }
 
-    // Source 2: RapidAPI Realtor.com — location autocomplete + property detail
+    // Source 2: RapidAPI Realty-in-US — auto-complete → v3/detail
     if (!result && RAPIDAPI_KEY) {
       try {
-        // First autocomplete to find the property
-        const autoData = await realtorApiFetch('/locations/auto-complete', {
-          input: address,
-        });
-        const autoResults = autoData?.autocomplete || [];
-        const match = autoResults.find(r => r.mpr_id || r.id) || autoResults[0];
-        if (match && match.mpr_id) {
-          const detail = await realtorApiFetch('/properties/v2/detail', {
-            property_id: match.mpr_id,
-          });
-          const prop = detail?.properties?.[0] || detail?.data?.home || {};
+        // Step 1: auto-complete to find property_id
+        const autoData = await realtorApiGet('/locations/v2/auto-complete', { input: address });
+        const match = autoData?.autocomplete?.find(r => r.mpr_id) || autoData?.autocomplete?.[0];
+        if (match?.mpr_id) {
+          // Step 2: get full property detail
+          const detailData = await realtorApiGet('/properties/v3/detail', { property_id: match.mpr_id });
+          const prop = detailData?.data?.home;
           if (prop) {
-            const addr = prop.address || {};
+            const addr = prop.location?.address || {};
+            const desc = prop.description || {};
+            const taxEntry = prop.tax_history?.[0];
             result = {
               source: 'realtor',
               property: {
@@ -520,18 +595,28 @@ async function lookupProperty(address) {
                 city: addr.city || null,
                 state: addr.state_code || addr.state || null,
                 zipCode: addr.postal_code || null,
-                propertyType: prop.prop_type || prop.description?.type || null,
-                bedrooms: prop.beds ?? prop.description?.beds ?? null,
-                bathrooms: prop.baths ?? prop.description?.baths ?? null,
-                squareFootage: prop.sqft ?? prop.description?.sqft ?? null,
-                lotSize: prop.lot_sqft ?? prop.description?.lot_sqft ?? null,
-                yearBuilt: prop.year_built ?? prop.description?.year_built ?? null,
+                propertyType: desc.type || null,
+                bedrooms: desc.beds ?? null,
+                bathrooms: desc.baths ?? null,
+                squareFootage: desc.sqft ?? null,
+                lotSize: desc.lot_sqft ?? null,
+                yearBuilt: desc.year_built ?? null,
                 lastSalePrice: prop.last_sold_price ?? null,
                 lastSaleDate: prop.last_sold_date ?? null,
-                taxAssessment: null,
-                latitude: prop.address?.lat ?? addr.lat ?? null,
-                longitude: prop.address?.lon ?? addr.lon ?? null,
-                price: prop.list_price ?? prop.price ?? null,
+                taxAssessment: taxEntry?.assessment?.total ?? null,
+                latitude: addr.coordinate?.lat ?? null,
+                longitude: addr.coordinate?.lon ?? null,
+                price: prop.list_price ?? null,
+                zestimate: prop.estimate?.estimate ?? null,
+                imgSrc: prop.photos?.[0]?.href ?? prop.primary_photo?.href ?? null,
+                href: prop.href ?? null,
+                daysOnMarket: prop.days_on_market ?? null,
+                mortgage: prop.mortgage?.estimate ? {
+                  monthlyPayment: prop.mortgage.estimate.monthly_payment,
+                  downPayment: prop.mortgage.estimate.down_payment,
+                  rate: prop.mortgage.estimate.average_rate?.rate,
+                  loanAmount: prop.mortgage.estimate.loan_amount,
+                } : null,
               },
             };
           }
@@ -593,6 +678,7 @@ async function lookupProperty(address) {
     if (!result) return null;
 
     cacheSet(cacheKey, result);
+    dbCacheSet(cacheKey, result, '24 hours');
     return result;
 }
 
@@ -652,6 +738,11 @@ async function fetchListings(filters) {
   const cacheKey = `listings:${loc}:${JSON.stringify({ minPrice, maxPrice, beds, baths })}`.toLowerCase();
   const cached = cacheGet(cacheKey);
   if (cached) return { ...cached, cached: true };
+  const dbCached = dbCacheGet(cacheKey);
+  if (dbCached) {
+    cacheSet(cacheKey, dbCached);
+    return { ...dbCached, cached: true };
+  }
 
   let result = null;
 
@@ -681,39 +772,51 @@ async function fetchListings(filters) {
     } catch (err) { console.log('Zillow listings API failed:', err.message); }
   }
 
-  // Source 2: RapidAPI Realtor.com
+  // Source 2: RapidAPI Realty-in-US (Realtor.com) — v3/list
   if (!result && RAPIDAPI_KEY) {
     try {
-      const params = { limit: lim || 25, offset: 0, sort: 'newest' };
-      if (zipCode) { params.postal_code = zipCode; }
-      else if (city && state) { params.city = city; params.state_code = state; }
-      else {
-        const autoData = await realtorApiFetch('/locations/auto-complete', { input: loc });
-        const match = autoData?.autocomplete?.[0];
-        if (match) { params.city = match.city; params.state_code = match.state_code; }
+      const body = {
+        limit: lim || 25,
+        offset: 0,
+        status: ['for_sale'],
+        sort: { direction: 'desc', field: 'list_date' },
+      };
+      if (zipCode) {
+        body.postal_code = zipCode;
+      } else if (city && state) {
+        body.city = city;
+        body.state_code = state;
+      } else {
+        // Free-text: use search_location with radius
+        body.search_location = { location: loc, radius: 10 };
       }
-      if (minPrice) params.price_min = minPrice;
-      if (maxPrice) params.price_max = maxPrice;
-      if (beds) params.beds_min = beds;
-      if (baths) params.baths_min = baths;
+      if (minPrice || maxPrice) {
+        body.list_price = {};
+        if (minPrice) body.list_price.min = Number(minPrice);
+        if (maxPrice) body.list_price.max = Number(maxPrice);
+      }
+      if (beds) body.beds = { min: Number(beds) };
+      if (baths) body.baths = { min: Number(baths) };
 
-      const data = await realtorApiFetch('/properties/v2/list-for-sale', params);
-      const props = data?.properties || data?.data?.results || [];
+      const data = await realtorApiPost('/properties/v3/list', body);
+      const props = data?.data?.home_search?.results || [];
       if (Array.isArray(props) && props.length > 0) {
         result = {
           source: 'realtor',
           listings: props.map(p => {
-            const addr = p.address || {};
+            const addr = p.location?.address || {};
+            const desc = p.description || {};
             return {
               address: addr.line || '--', city: addr.city || null,
               state: addr.state_code || null, zipCode: addr.postal_code || null,
-              price: p.list_price ?? p.price ?? 0,
-              bedrooms: p.beds ?? p.description?.beds ?? null,
-              bathrooms: p.baths ?? p.description?.baths ?? null,
-              squareFootage: p.sqft ?? p.building_size?.size ?? null,
-              propertyType: p.prop_type || null, yearBuilt: p.year_built ?? null,
-              daysOnMarket: null, latitude: addr.lat ?? null, longitude: addr.lon ?? null,
-              status: p.prop_status || 'for_sale', imgSrc: p.thumbnail ?? p.photos?.[0]?.href ?? null,
+              price: p.list_price ?? 0,
+              bedrooms: desc.beds ?? null,
+              bathrooms: desc.baths ?? null,
+              squareFootage: desc.sqft ?? null,
+              propertyType: desc.type || null, yearBuilt: desc.year_built ?? null,
+              daysOnMarket: null, latitude: addr.coordinate?.lat ?? null, longitude: addr.coordinate?.lon ?? null,
+              status: p.status || 'for_sale', imgSrc: p.primary_photo?.href ?? null,
+              zestimate: p.estimate?.estimate ?? null,
             };
           }),
         };
@@ -793,6 +896,7 @@ async function fetchListings(filters) {
   };
 
   cacheSet(cacheKey, response);
+  dbCacheSet(cacheKey, response, '24 hours');
   return response;
 }
 
@@ -1010,34 +1114,184 @@ function getZHVIData(zipCode) {
 }
 
 // ---------------------------------------------------------------------------
-// GreatSchools API — school ratings by location (optional, needs API key)
+// School Ratings — SchoolDigger API (primary) → Census education (fallback)
 // ---------------------------------------------------------------------------
-async function fetchSchoolRatings(lat, lon) {
-  if (!GREATSCHOOLS_KEY) return null;
+
+/**
+ * Fetch school ratings via SchoolDigger API (free dev/test: 20 calls/day).
+ * Returns nearby schools with 0-5 star rankings, test scores, and state rank.
+ * @param {number} lat - Latitude
+ * @param {number} lon - Longitude
+ * @param {string} state - Two-letter state code (e.g. 'MN')
+ * @param {string} zipCode - ZIP code for Census fallback
+ * @returns {{ avgRating, schoolCount, topSchool, topRating, source, schools }}
+ */
+async function fetchSchoolRatings(lat, lon, state, zipCode) {
   const cacheKey = `schools:${lat.toFixed(3)},${lon.toFixed(3)}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
 
-  try {
-    const url = `https://gs-api.greatschools.org/nearby-schools?lat=${lat}&lon=${lon}&limit=10&radius=5`;
-    const r = await fetch(url, {
-      headers: { 'X-API-Key': GREATSCHOOLS_KEY, 'User-Agent': 'PropScout/1.0' },
-    });
-    if (!r.ok) return null;
-    const data = await r.json();
-    const schools = (data.schools || []).filter(s => s.rating != null);
-    if (!schools.length) return null;
+  // Check in-memory cache first (fast)
+  const memCached = cacheGet(cacheKey);
+  if (memCached) return memCached;
 
-    const avgRating = schools.reduce((s, sc) => s + sc.rating, 0) / schools.length;
-    const result = {
-      avgRating: +avgRating.toFixed(1),
-      schoolCount: schools.length,
-      topSchool: schools.sort((a, b) => b.rating - a.rating)[0]?.name || null,
-      topRating: schools.sort((a, b) => b.rating - a.rating)[0]?.rating || null,
+  // Check persistent SQLite cache (survives redeploys)
+  const dbCached = dbCacheGet(cacheKey);
+  if (dbCached) {
+    cacheSet(cacheKey, dbCached); // warm in-memory cache
+    return dbCached;
+  }
+
+  // Try SchoolDigger first (richest data)
+  if (SCHOOLDIGGER_APP_ID && SCHOOLDIGGER_API_KEY) {
+    try {
+      const result = await fetchSchoolDigger(lat, lon, state);
+      if (result) {
+        cacheSet(cacheKey, result);
+        dbCacheSet(cacheKey, result, '7 days'); // persist to SQLite
+        return result;
+      }
+    } catch (err) {
+      console.log('SchoolDigger error:', err.message);
+    }
+  }
+
+  // Try GreatSchools as second option
+  if (GREATSCHOOLS_KEY) {
+    try {
+      const result = await fetchGreatSchools(lat, lon);
+      if (result) {
+        cacheSet(cacheKey, result);
+        dbCacheSet(cacheKey, result, '7 days');
+        return result;
+      }
+    } catch (err) {
+      console.log('GreatSchools error:', err.message);
+    }
+  }
+
+  // Free fallback: Census education attainment
+  if (zipCode) {
+    try {
+      const result = await fetchCensusEducation(zipCode);
+      if (result) {
+        cacheSet(cacheKey, result);
+        dbCacheSet(cacheKey, result, '30 days'); // Census data changes yearly
+        return result;
+      }
+    } catch (err) {
+      console.log('Census education error:', err.message);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * SchoolDigger API — search nearby schools by lat/lon + state.
+ * Free tier: 20 calls/day, 1/min, no credit card.
+ * Docs: https://developer.schooldigger.com/docs
+ */
+async function fetchSchoolDigger(lat, lon, state) {
+  if (!state) return null;
+  const url = `https://api.schooldigger.com/v2.3/schools?st=${state}&nearLatitude=${lat}&nearLongitude=${lon}&nearMiles=5&perPage=10&sortBy=distance&appID=${SCHOOLDIGGER_APP_ID}&appKey=${SCHOOLDIGGER_API_KEY}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) {
+    if (r.status === 429) console.log('SchoolDigger rate limited (20/day free tier)');
+    return null;
+  }
+  const data = await r.json();
+  const schoolList = (data.schoolList || []).filter(s => s.rankHistory?.length > 0);
+  if (!schoolList.length) return null;
+
+  // SchoolDigger uses 0-5 star ranking
+  const schools = schoolList.map(s => {
+    const latestRank = s.rankHistory[0] || {};
+    return {
+      name: s.schoolName,
+      level: s.schoolLevel || null,
+      rating: latestRank.rankStars ?? null,
+      stateRank: latestRank.rank ?? null,
+      stateRankOf: latestRank.rankOf ?? null,
+      rankPct: latestRank.rankOf ? Math.round((1 - latestRank.rank / latestRank.rankOf) * 100) : null,
+      distance: s.distance ?? null,
     };
-    cacheSet(cacheKey, result);
-    return result;
-  } catch { return null; }
+  }).filter(s => s.rating != null);
+
+  if (!schools.length) return null;
+
+  const avgRating = schools.reduce((sum, s) => sum + s.rating, 0) / schools.length;
+  const topSchool = schools.sort((a, b) => b.rating - a.rating)[0];
+
+  return {
+    avgRating: +avgRating.toFixed(1),
+    schoolCount: schools.length,
+    topSchool: topSchool.name,
+    topRating: topSchool.rating,
+    topRankPct: topSchool.rankPct,
+    source: 'SchoolDigger',
+    schools,
+  };
+}
+
+/**
+ * GreatSchools API — nearby schools with 1-10 rating.
+ * Requires paid API key ($52.50/mo minimum).
+ */
+async function fetchGreatSchools(lat, lon) {
+  const url = `https://gs-api.greatschools.org/nearby-schools?lat=${lat}&lon=${lon}&limit=10&radius=5`;
+  const r = await fetch(url, {
+    headers: { 'X-API-Key': GREATSCHOOLS_KEY, 'User-Agent': 'PropScout/1.0' },
+  });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const schools = (data.schools || []).filter(s => s.rating != null);
+  if (!schools.length) return null;
+
+  const avgRating = schools.reduce((s, sc) => s + sc.rating, 0) / schools.length;
+  const sorted = [...schools].sort((a, b) => b.rating - a.rating);
+  return {
+    avgRating: +avgRating.toFixed(1),
+    schoolCount: schools.length,
+    topSchool: sorted[0]?.name || null,
+    topRating: sorted[0]?.rating || null,
+    source: 'GreatSchools',
+  };
+}
+
+/**
+ * Census ACS education attainment — free, no API key needed.
+ * Fetches Bachelor's+ rate for a ZIP code as a proxy for school quality.
+ * B15003_001E = total pop 25+, B15003_022E-025E = Bachelor's through Doctorate
+ */
+async function fetchCensusEducation(zipCode) {
+  const vars = 'B15003_001E,B15003_022E,B15003_023E,B15003_024E,B15003_025E';
+  const url = `https://api.census.gov/data/2022/acs/acs5?get=${vars}&for=zip%20code%20tabulation%20area:${zipCode}`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+  if (!r.ok) return null;
+  const data = await r.json();
+  if (!data || data.length < 2) return null;
+
+  const row = data[1];
+  const totalPop25 = parseInt(row[0]) || 0;
+  const bachelors = parseInt(row[1]) || 0;
+  const masters = parseInt(row[2]) || 0;
+  const professional = parseInt(row[3]) || 0;
+  const doctorate = parseInt(row[4]) || 0;
+
+  if (totalPop25 === 0) return null;
+
+  const collegeTotal = bachelors + masters + professional + doctorate;
+  const collegeRate = +(collegeTotal / totalPop25 * 100).toFixed(1);
+  // Convert to 0-5 star equivalent: national avg ~33%, map 0-66%+ → 0-5 stars
+  const starEquivalent = +Math.min(5, (collegeRate / 66) * 5).toFixed(1);
+
+  return {
+    avgRating: starEquivalent,
+    schoolCount: 0,
+    topSchool: null,
+    topRating: null,
+    collegeRate,
+    source: 'Census Education',
+  };
 }
 
 /**
@@ -1174,7 +1428,7 @@ function crimeDataLookup(stateAbbr) {
  * @param {object} walkScore - Walk Score API result
  * @param {object} crime - FBI crime data with yearlyRates
  * @param {object|null} zhvi - Zillow ZHVI data { current_value, yoy_change, ... }
- * @param {object|null} schools - GreatSchools ratings
+ * @param {object|null} schools - School ratings (SchoolDigger, GreatSchools, or Census)
  * @returns {{ overallScore, trend, factors, drivers, dataSources }}
  */
 function computeMomentumScore(censusData, walkScore, crime, zhvi, schools) {
@@ -1289,14 +1543,27 @@ function computeMomentumScore(censusData, walkScore, crime, zhvi, schools) {
   }
   factors.push({ name: 'Income Growth', score: incomeScore, weight: 0.15, detail: incomeDetail, trend: incomeTrend });
 
-  // === 6. Walkability (10%) — or Schools if available ===
+  // === 6. Schools (10%) + Walkability (5%) — or Walkability alone (10%) ===
   if (schools?.avgRating != null) {
-    const schoolScore = Math.min(100, Math.round(schools.avgRating * 10));
+    // Normalize to 0-100: SchoolDigger is 0-5 stars, GreatSchools is 1-10, Census is 0-5
+    const maxScale = schools.source === 'GreatSchools' ? 10 : 5;
+    const schoolScore = Math.min(100, Math.round((schools.avgRating / maxScale) * 100));
+    let schoolDetail;
+    if (schools.source === 'SchoolDigger') {
+      schoolDetail = `${schools.avgRating}/5 stars (${schools.schoolCount} nearby)`;
+      if (schools.topSchool && schools.topRankPct) {
+        schoolDetail += ` • Top: ${schools.topSchool} (top ${100 - schools.topRankPct}%)`;
+      }
+    } else if (schools.source === 'Census Education') {
+      schoolDetail = `${schools.collegeRate}% college-educated (Census)`;
+    } else {
+      schoolDetail = `${schools.avgRating}/10 avg (${schools.schoolCount} nearby)`;
+    }
     factors.push({
-      name: 'Schools', score: schoolScore, weight: 0.05,
-      detail: `${schools.avgRating}/10 avg (${schools.schoolCount} nearby)`,
+      name: 'Schools', score: schoolScore, weight: 0.10,
+      detail: schoolDetail,
     });
-    dataSources.push('GreatSchools');
+    dataSources.push(schools.source || 'Schools');
     // Give walkability remaining 5%
     let walkVal = 50;
     let walkDet = WALKSCORE_KEY ? 'Score unavailable' : 'Add WALKSCORE_API_KEY';
@@ -1376,7 +1643,7 @@ app.get('/api/momentum', async (req, res) => {
       censusMultiYearFetch(zipCode),
       latF && lonF ? walkScoreFetch(latF, lonF, '') : Promise.resolve(null),
       Promise.resolve(state ? crimeDataLookup(state) : null),
-      latF && lonF ? fetchSchoolRatings(latF, lonF) : Promise.resolve(null),
+      latF && lonF ? fetchSchoolRatings(latF, lonF, state, zipCode) : Promise.resolve(null),
     ]);
 
     const censusData = censusResult.status === 'fulfilled' ? censusResult.value : null;
@@ -2951,7 +3218,7 @@ app.get('/api/health', (req, res) => {
   sources.rentcast = RENTCAST_KEY ? 'active' : 'not configured';
   sources.census = 'active (free, multi-year Y-o-Y)';
   sources.walkscore = WALKSCORE_KEY ? 'active' : 'not configured';
-  sources.greatschools = GREATSCHOOLS_KEY ? 'active' : 'not configured';
+  sources.schools = SCHOOLDIGGER_APP_ID ? 'active (SchoolDigger)' : GREATSCHOOLS_KEY ? 'active (GreatSchools)' : 'active (Census education fallback)';
   sources.crime = 'active (embedded BJS/FBI NIBRS 2022-2023 data)';
   sources.geocoding = 'active (free)';
   sources.fccGeocode = 'active (free)';
@@ -4196,17 +4463,19 @@ app.listen(PORT, () => {
   console.log('Data sources:');
   if (RAPIDAPI_KEY) {
     console.log('  Zillow (RapidAPI): ACTIVE');
-    console.log('  Realtor.com (RapidAPI): ACTIVE');
+    console.log('  Realty-in-US (RapidAPI): ACTIVE');
   } else {
     console.log('  Zillow (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
-    console.log('  Realtor.com (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
+    console.log('  Realty-in-US (RapidAPI): not configured — add RAPIDAPI_KEY to .env');
   }
   if (RENTCAST_KEY) console.log('  RentCast: ACTIVE');
   else console.log('  RentCast: not configured — add RENTCAST_API_KEY to .env');
   console.log('  Census ACS (free): multi-year Y-o-Y comparison');
   console.log('  FBI/BJS Crime Data: ACTIVE (embedded NIBRS 2022-2023, 47 states)');
   if (WALKSCORE_KEY) console.log('  Walk Score: ACTIVE');
-  if (GREATSCHOOLS_KEY) console.log('  GreatSchools: ACTIVE');
+  if (SCHOOLDIGGER_APP_ID) console.log('  Schools: SchoolDigger ACTIVE (free tier: 20/day)');
+  else if (GREATSCHOOLS_KEY) console.log('  Schools: GreatSchools ACTIVE');
+  else console.log('  Schools: Census education fallback (free)');
   if (ANTHROPIC_API_KEY) console.log('  AI Narrative (Claude): ACTIVE');
   else if (OPENAI_API_KEY) console.log('  AI Narrative (OpenAI): ACTIVE');
   else if (GEMINI_API_KEY) console.log('  AI Narrative (Gemini Free): ACTIVE');
