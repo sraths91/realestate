@@ -509,7 +509,35 @@ async function rentcastFetch(endpoint, params = {}) {
  * @param {string} address
  * @returns {Object|null} { source, property, valuation?, rentEstimate? }
  */
+/**
+ * Clean verbose Nominatim display_name into a simple address for API lookups.
+ * "114, Northeast 3rd Avenue, St Anthony West, Minneapolis, Hennepin County, Minnesota, 55413, United States"
+ * → "114 Northeast 3rd Avenue, Minneapolis, Minnesota 55413"
+ */
+function cleanAddress(raw) {
+  const parts = raw.split(',').map(s => s.trim());
+  // Remove country (last part if "United States" or similar)
+  if (/united states|usa|us$/i.test(parts[parts.length - 1])) parts.pop();
+  // Find zip code part
+  const zipIdx = parts.findIndex(p => /^\d{5}/.test(p));
+  const zip = zipIdx >= 0 ? parts.splice(zipIdx, 1)[0].slice(0, 5) : '';
+  // Find state (2-letter code or full name after city)
+  // Remove county parts (contains "County")
+  const filtered = parts.filter(p => !/county$/i.test(p));
+  if (filtered.length <= 3) {
+    // Short enough: "114 NE 3rd Ave, Minneapolis, MN"
+    return (filtered.join(', ') + (zip ? ' ' + zip : '')).replace(/\s+/g, ' ').trim();
+  }
+  // Long Nominatim format: street num, street name, neighborhood, city, state
+  // Take first 2 parts as street, then city (skip neighborhood), then state
+  const street = filtered.slice(0, 2).join(' ');
+  const city = filtered.length >= 4 ? filtered[filtered.length - 2] : filtered[2] || '';
+  const state = filtered[filtered.length - 1] || '';
+  return `${street}, ${city}, ${state}${zip ? ' ' + zip : ''}`.replace(/\s+/g, ' ').trim();
+}
+
 async function lookupProperty(address) {
+  address = cleanAddress(address);
   const cacheKey = `lookup:${address.toLowerCase().trim()}`;
   const cached = cacheGet(cacheKey);
   if (cached) return { ...cached, cached: true };
