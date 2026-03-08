@@ -477,7 +477,7 @@ async function performSearch(address) {
         priceRangeLow: Math.round(estimate * 0.95),
         priceRangeHigh: Math.round(estimate * 1.05),
         rentEstimate: property.rentZestimate || null,
-        comparables: data.valuation?.comparables || [],
+        comparables: data.comparables || data.valuation?.comparables || [],
         mortgage: property.mortgage || null,
       };
     } else if (data.valuation) {
@@ -486,8 +486,11 @@ async function performSearch(address) {
         priceRangeLow: data.valuation.priceRangeLow,
         priceRangeHigh: data.valuation.priceRangeHigh,
         rentEstimate: data.rentEstimate || null,
-        comparables: data.valuation.comparables || [],
+        comparables: data.comparables || data.valuation.comparables || [],
       };
+    } else if (data.comparables?.length) {
+      // No valuation but we have comparables
+      valuation = { comparables: data.comparables };
     }
 
     renderSearchResults(prop, valuation);
@@ -575,8 +578,8 @@ function renderSearchResults(property, valuation) {
     const card = document.createElement('div');
     card.className = 'comp-card';
     card.innerHTML = `
-      <div class="comp-address">${comp.formattedAddress || comp.addressLine1 || '--'}</div>
-      <div class="comp-price">${fmtCurrency(comp.price || comp.lastSalePrice)}</div>
+      <div class="comp-address">${comp.address || comp.formattedAddress || comp.addressLine1 || '--'}</div>
+      <div class="comp-price">${fmtCurrency(comp.soldPrice || comp.price || comp.lastSalePrice)}</div>
       <div class="comp-details">
         <span class="comp-detail">${comp.bedrooms || '--'} bd</span>
         <span class="comp-detail">${comp.bathrooms || '--'} ba</span>

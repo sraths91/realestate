@@ -720,6 +720,50 @@ app.get('/api/property-lookup', async (req, res) => {
     if (!address) return res.status(400).json({ error: 'Missing address' });
     const result = await lookupProperty(address);
     if (!result) return res.status(404).json({ error: 'Could not find property data from any source' });
+
+    // Fetch comparables — nearby similar listings in the same zip
+    if (result.property?.zipCode && RAPIDAPI_KEY && !result.comparables?.length) {
+      try {
+        const prop = result.property;
+        const body = {
+          limit: 6,
+          offset: 0,
+          postal_code: prop.zipCode,
+          status: ['for_sale', 'sold'],
+          sort: { direction: 'desc', field: 'sold_date' },
+        };
+        if (prop.propertyType) body.type = [prop.propertyType];
+        const compData = await realtorApiPost('/properties/v3/list', body);
+        const compResults = compData?.data?.home_search?.results || [];
+        result.comparables = compResults
+          .filter(c => c.property_id !== result.property?.property_id)
+          .slice(0, 5)
+          .map(c => {
+            const addr = c.location?.address || {};
+            const desc = c.description || {};
+            return {
+              address: addr.line || '--',
+              city: addr.city || null,
+              state: addr.state_code || null,
+              zipCode: addr.postal_code || null,
+              price: c.list_price ?? null,
+              soldPrice: c.last_sold_price ?? null,
+              bedrooms: desc.beds ?? null,
+              bathrooms: desc.baths ?? null,
+              squareFootage: desc.sqft ?? null,
+              propertyType: desc.type || null,
+              latitude: addr.coordinate?.lat ?? null,
+              longitude: addr.coordinate?.lon ?? null,
+              imgSrc: c.primary_photo?.href ?? null,
+              status: c.status || null,
+            };
+          });
+      } catch (err) {
+        console.log('Comparables fetch failed:', err.message);
+        result.comparables = [];
+      }
+    }
+
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
