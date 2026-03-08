@@ -429,14 +429,14 @@ async function performSearch(address) {
     const res = await fetch(`/api/property-lookup?address=${encodeURIComponent(address)}`);
     const data = await res.json();
 
-    // If API returned an error, fall back to demo data
+    // If API returned an error, show helpful message (never fake data)
     if (data.error) {
       console.warn('[PropScout] property-lookup error:', data.error);
-      const demoResult = await fallbackToDemo(address);
-      renderSearchResults(demoResult.prop, demoResult.val);
       hide('search-loading');
-      show('search-results');
-      toast(`API error: ${data.error}`, 'info');
+      show('search-empty');
+      const emptyText = $('search-empty-text');
+      if (emptyText) emptyText.textContent = 'No property found. Try a specific street address with number (e.g. "123 Main St, Minneapolis, MN").';
+      toast('No property found — try a more specific address', 'info');
       return;
     }
 
