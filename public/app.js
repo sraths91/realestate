@@ -350,37 +350,38 @@ function initSearch() {
     if (e.key === 'Enter') performSearch(input.value.trim());
   });
 
-  // Address autocomplete via Nominatim
+  // Address autocomplete via Realtor API (falls back to Nominatim if no key)
   const autoComplete = debounce(async (q) => {
-    if (q.length < 4) {
+    if (q.length < 3) {
       suggestions.classList.remove('show');
       return;
     }
     try {
-      const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+      const res = await fetch(`/api/address-autocomplete?q=${encodeURIComponent(q)}`);
       const data = await res.json();
       if (!data.length) {
         suggestions.classList.remove('show');
         return;
       }
       suggestions.innerHTML = data
-        .map(
-          (d) =>
-            `<div class="suggestion-item" data-lat="${d.lat}" data-lon="${d.lon}" data-name="${d.display_name}">${d.display_name}</div>`
-        )
+        .map((d, i) => {
+          const icon = d.type === 'address' ? '📍' : d.type === 'city' ? '🏙️' : d.type === 'postal_code' ? '📮' : '📌';
+          return `<div class="suggestion-item" data-idx="${i}" data-display="${d.display}" data-lat="${d.lat || ''}" data-lon="${d.lon || ''}" data-mpr="${d.mpr_id || ''}">${icon} ${d.display}</div>`;
+        })
         .join('');
       suggestions.classList.add('show');
       suggestions.querySelectorAll('.suggestion-item').forEach((item) => {
         item.addEventListener('click', () => {
-          input.value = item.dataset.name;
+          const display = item.dataset.display;
+          input.value = display;
           suggestions.classList.remove('show');
-          performSearch(item.dataset.name);
+          performSearch(display);
         });
       });
     } catch {
       /* ignore */
     }
-  }, 350);
+  }, 300);
 
   input.addEventListener('input', () => autoComplete(input.value.trim()));
   document.addEventListener('click', (e) => {

@@ -3216,6 +3216,55 @@ app.get('/api/geocode', async (req, res) => {
   }
 });
 
+app.get('/api/address-autocomplete', async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 3) return res.json([]);
+    const key = `autocomplete:${q.toLowerCase()}`;
+    const cached = cacheGet(key);
+    if (cached) return res.json(cached);
+
+    if (RAPIDAPI_KEY) {
+      const data = await realtorApiGet('/locations/v2/auto-complete', { input: q });
+      const results = (data?.autocomplete || []).map(r => ({
+        display: r.full_address?.[0] || r.line
+          ? `${r.line || ''}, ${r.city || ''}, ${r.state_code || ''} ${r.postal_code || ''}`.replace(/^, /, '').trim()
+          : r.city ? `${r.city}, ${r.state_code || ''}` : q,
+        line: r.line || null,
+        city: r.city || null,
+        state: r.state_code || null,
+        zip: r.postal_code || null,
+        lat: r.centroid?.lat || null,
+        lon: r.centroid?.lon || null,
+        mpr_id: r.mpr_id || null,
+        type: r.area_type || 'unknown',
+      }));
+      cacheSet(key, results);
+      return res.json(results);
+    }
+
+    // Fallback to Nominatim if no RapidAPI key
+    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&q=${encodeURIComponent(q)}`;
+    const response = await fetch(url, { headers: { 'User-Agent': 'PropScout/1.0' } });
+    const data = await response.json();
+    const results = data.map(d => ({
+      display: d.display_name,
+      line: null,
+      city: d.address?.city || d.address?.town || null,
+      state: d.address?.state || null,
+      zip: d.address?.postcode || null,
+      lat: parseFloat(d.lat),
+      lon: parseFloat(d.lon),
+      mpr_id: null,
+      type: d.type || 'unknown',
+    }));
+    cacheSet(key, results);
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/reverse-geocode', async (req, res) => {
   try {
     const { lat, lon } = req.query;
