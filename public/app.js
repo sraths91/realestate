@@ -1775,11 +1775,75 @@ function renderCrimeAggregate(data, container) {
   const vPct = Math.min(100, Math.round((data.violentRate / 500) * 100));
   const pPct = Math.min(100, Math.round((data.propertyRate / 4000) * 100));
 
+  // YoY badge
+  const yoy = data.yoyChange;
+  let yoyBadge = '';
+  if (yoy != null) {
+    const arrow = yoy < 0 ? '\u25BC' : yoy > 0 ? '\u25B2' : '\u25CF';
+    const cls = yoy < 0 ? 'yoy-down' : yoy > 0 ? 'yoy-up' : 'yoy-flat';
+    yoyBadge = `<span class="yoy-badge ${cls}">${arrow} ${Math.abs(yoy)}% vs ${data.priorYear}</span>`;
+  }
+
+  // Expandable detail section (only if we have prior-year data)
+  let detailPanel = '';
+  if (data.priorRate != null) {
+    const rateDir = data.totalRate < data.priorRate ? 'crime-down' : data.totalRate > data.priorRate ? 'crime-up' : 'crime-flat';
+    const vDir = data.violentRate < data.priorViolentRate ? 'crime-down' : data.violentRate > data.priorViolentRate ? 'crime-up' : 'crime-flat';
+    const pDir = data.propertyRate < data.priorPropertyRate ? 'crime-down' : data.propertyRate > data.priorPropertyRate ? 'crime-up' : 'crime-flat';
+    const fmtChg = (cur, prev) => {
+      if (prev === 0) return cur > 0 ? '+\u221E' : '0';
+      const pct = ((cur - prev) / prev * 100).toFixed(1);
+      return (pct > 0 ? '+' : '') + pct + '%';
+    };
+    detailPanel = `
+    <div class="crime-yoy-toggle" onclick="this.nextElementSibling.classList.toggle('expanded');this.classList.toggle('open')">
+      <span>Year-over-Year Comparison</span>
+      <span class="toggle-arrow">\u25B6</span>
+    </div>
+    <div class="crime-yoy-detail">
+      <table class="yoy-table">
+        <thead><tr><th></th><th>${data.priorYear}</th><th>${data.year}</th><th>Change</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="yoy-metric">Total Rate</td>
+            <td>${data.priorRate.toLocaleString()}</td>
+            <td>${data.totalRate.toLocaleString()}</td>
+            <td class="${rateDir}">${fmtChg(data.totalRate, data.priorRate)}</td>
+          </tr>
+          <tr>
+            <td class="yoy-metric">Violent</td>
+            <td>${data.priorViolentRate.toLocaleString()}</td>
+            <td>${data.violentRate.toLocaleString()}</td>
+            <td class="${vDir}">${fmtChg(data.violentRate, data.priorViolentRate)}</td>
+          </tr>
+          <tr>
+            <td class="yoy-metric">Property</td>
+            <td>${data.priorPropertyRate.toLocaleString()}</td>
+            <td>${data.propertyRate.toLocaleString()}</td>
+            <td class="${pDir}">${fmtChg(data.propertyRate, data.priorPropertyRate)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="yoy-bar-compare">
+        <div class="yoy-bar-row">
+          <span class="yoy-bar-label">${data.priorYear}</span>
+          <div class="cat-bar"><div class="cat-bar-fill prior" style="width:${Math.min(100, Math.round((data.priorRate / Math.max(data.priorRate, data.totalRate)) * 100))}%"></div></div>
+          <span class="cat-count">${data.priorRate.toLocaleString()}</span>
+        </div>
+        <div class="yoy-bar-row">
+          <span class="yoy-bar-label">${data.year}</span>
+          <div class="cat-bar"><div class="cat-bar-fill current" style="width:${Math.min(100, Math.round((data.totalRate / Math.max(data.priorRate, data.totalRate)) * 100))}%"></div></div>
+          <span class="cat-count">${data.totalRate.toLocaleString()}</span>
+        </div>
+      </div>
+    </div>`;
+  }
+
   container.innerHTML = `
     <div class="crime-overview">
       <div class="crime-stat-card">
         <div class="crime-big-number ${levelClass}">${data.safetyLevel}</div>
-        <div class="crime-stat-label">Crime Level (${data.year})</div>
+        <div class="crime-stat-label">Crime Level (${data.year}) ${yoyBadge}</div>
       </div>
       <div class="crime-stat-card">
         <div class="crime-big-number">${data.violentRate}</div>
@@ -1804,6 +1868,7 @@ function renderCrimeAggregate(data, container) {
         </div>
       </div>
     </div>
+    ${detailPanel}
     <div class="crime-source">
       ${data.note || ''}<br>
       Source: ${data.source} | Pop: ${(data.population || 0).toLocaleString()}
