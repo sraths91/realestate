@@ -398,6 +398,7 @@ async function performSearch(address) {
   show('search-loading');
 
   // If server is unreachable, fall back to demo data
+  console.log('[PropScout] search state:', { demoMode: state.demoMode, apiLive: state.apiLive });
   if (state.demoMode && !state.apiLive) {
     let lat = 39.8283, lon = -98.5795, locationParts = {};
     try {
@@ -430,11 +431,12 @@ async function performSearch(address) {
 
     // If API returned an error, fall back to demo data
     if (data.error) {
+      console.warn('[PropScout] property-lookup error:', data.error);
       const demoResult = await fallbackToDemo(address);
       renderSearchResults(demoResult.prop, demoResult.val);
       hide('search-loading');
       show('search-results');
-      toast('No API keys configured — showing demo data. Add keys to .env for real results.', 'info');
+      toast(`API error: ${data.error}`, 'info');
       return;
     }
 
