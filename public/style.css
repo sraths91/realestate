@@ -217,7 +217,15 @@ select { cursor: pointer; appearance: none;
   display: flex; gap: 12px; color: var(--text-muted); font-size: 0.85rem; flex-wrap: wrap;
 }
 .comp-card .comp-detail { display: flex; align-items: center; gap: 4px; }
-.comp-card .comp-distance { font-size: 0.8rem; color: var(--text-dim); margin-top: 8px; }
+.comp-card .comp-score {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem;
+  font-weight: 700; color: #fff; margin-bottom: 8px; letter-spacing: 0.02em;
+}
+.comp-card .comp-meta {
+  display: flex; gap: 12px; font-size: 0.8rem; color: var(--text-dim); margin-top: 8px;
+}
+.comp-card .comp-distance { font-size: 0.8rem; }
+.comp-card .comp-sale-date { font-size: 0.8rem; }
 
 /* ===== MINI MAP ===== */
 .mini-map { height: 350px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); }

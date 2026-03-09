@@ -577,7 +577,15 @@ function renderSearchResults(property, valuation) {
   comps.forEach((comp) => {
     const card = document.createElement('div');
     card.className = 'comp-card';
+    const score = comp.compScore;
+    const scoreColor = score >= 70 ? '#22c55e' : score >= 45 ? '#eab308' : '#94a3b8';
+    const scoreLabel = score >= 70 ? 'Strong' : score >= 45 ? 'Moderate' : 'Weak';
+    const bd = comp.scoreBreakdown || {};
+    const saleLine = comp.soldDate
+      ? `Sold ${new Date(comp.soldDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}${comp.daysSinceSale != null ? ` (${comp.daysSinceSale}d ago)` : ''}`
+      : comp.status === 'for_sale' ? 'Listed' : '';
     card.innerHTML = `
+      ${score != null ? `<div class="comp-score" style="background:${scoreColor}" title="Proximity: ${bd.proximity || 0}/35 | Similarity: ${bd.similarity || 0}/40 | Recency: ${bd.recency || 0}/25">${score}/100 ${scoreLabel}</div>` : ''}
       <div class="comp-address">${comp.address || comp.formattedAddress || comp.addressLine1 || '--'}</div>
       <div class="comp-price">${fmtCurrency(comp.soldPrice || comp.price || comp.lastSalePrice)}</div>
       <div class="comp-details">
@@ -586,7 +594,10 @@ function renderSearchResults(property, valuation) {
         <span class="comp-detail">${fmt(comp.squareFootage)} sqft</span>
         <span class="comp-detail">${comp.propertyType || '--'}</span>
       </div>
-      ${comp.distance != null ? `<div class="comp-distance">${comp.distance.toFixed(1)} mi away</div>` : ''}
+      <div class="comp-meta">
+        ${comp.distance != null ? `<span class="comp-distance">${comp.distance.toFixed(1)} mi</span>` : ''}
+        ${saleLine ? `<span class="comp-sale-date">${saleLine}</span>` : ''}
+      </div>
     `;
     compsGrid.appendChild(card);
   });

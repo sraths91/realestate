@@ -721,43 +721,97 @@ app.get('/api/property-lookup', async (req, res) => {
     const result = await lookupProperty(address);
     if (!result) return res.status(404).json({ error: 'Could not find property data from any source' });
 
-    // Fetch comparables — nearby similar listings in the same zip
+    // Fetch & score comparables — nearby similar properties ranked by relevance
     if (result.property?.zipCode && RAPIDAPI_KEY && !result.comparables?.length) {
       try {
         const prop = result.property;
         const body = {
-          limit: 6,
+          limit: 20,
           offset: 0,
           postal_code: prop.zipCode,
-          status: ['for_sale', 'sold'],
+          status: ['sold', 'for_sale'],
           sort: { direction: 'desc', field: 'sold_date' },
         };
-        if (prop.propertyType) body.type = [prop.propertyType];
         const compData = await realtorApiPost('/properties/v3/list', body);
-        const compResults = compData?.data?.home_search?.results || [];
-        result.comparables = compResults
-          .filter(c => c.property_id !== result.property?.property_id)
-          .slice(0, 5)
-          .map(c => {
-            const addr = c.location?.address || {};
-            const desc = c.description || {};
-            return {
-              address: addr.line || '--',
-              city: addr.city || null,
-              state: addr.state_code || null,
-              zipCode: addr.postal_code || null,
-              price: c.list_price ?? null,
-              soldPrice: c.last_sold_price ?? null,
-              bedrooms: desc.beds ?? null,
-              bathrooms: desc.baths ?? null,
-              squareFootage: desc.sqft ?? null,
-              propertyType: desc.type || null,
-              latitude: addr.coordinate?.lat ?? null,
-              longitude: addr.coordinate?.lon ?? null,
-              imgSrc: c.primary_photo?.href ?? null,
-              status: c.status || null,
-            };
-          });
+        const compResults = (compData?.data?.home_search?.results || [])
+          .filter(c => c.property_id !== prop.property_id);
+
+        // Score each comp on closeness, similarity, and recency
+        const scored = compResults.map(c => {
+          const addr = c.location?.address || {};
+          const desc = c.description || {};
+          const cLat = addr.coordinate?.lat;
+          const cLon = addr.coordinate?.lon;
+
+          // Distance score (0-35 pts): closer = better
+          let distScore = 0;
+          if (prop.latitude && prop.longitude && cLat && cLon) {
+            const dLat = (prop.latitude - cLat) * 69; // ~69 mi per degree lat
+            const dLon = (prop.longitude - cLon) * 69 * Math.cos(prop.latitude * Math.PI / 180);
+            const distMi = Math.sqrt(dLat * dLat + dLon * dLon);
+            distScore = Math.max(0, 35 * (1 - distMi / 3)); // 0 mi = 35, 3+ mi = 0
+          }
+
+          // Similarity score (0-40 pts): beds, baths, sqft, type
+          let simScore = 0;
+          if (prop.bedrooms != null && desc.beds != null) {
+            simScore += Math.max(0, 10 - Math.abs(prop.bedrooms - desc.beds) * 4);
+          }
+          if (prop.bathrooms != null && desc.baths != null) {
+            simScore += Math.max(0, 8 - Math.abs(prop.bathrooms - desc.baths) * 3);
+          }
+          if (prop.squareFootage && desc.sqft) {
+            const sqftRatio = Math.min(prop.squareFootage, desc.sqft) / Math.max(prop.squareFootage, desc.sqft);
+            simScore += Math.round(12 * sqftRatio); // 100% match = 12 pts
+          }
+          if (prop.propertyType && desc.type && prop.propertyType === desc.type) {
+            simScore += 10; // same type bonus
+          }
+
+          // Recency score (0-25 pts): more recent = better
+          let recencyScore = 0;
+          const soldDate = c.last_sold_date || c.list_date;
+          let daysSince = null;
+          if (soldDate) {
+            daysSince = Math.max(0, (Date.now() - new Date(soldDate).getTime()) / 86400000);
+            recencyScore = Math.max(0, 25 * (1 - daysSince / 365)); // within 1yr = good
+          }
+
+          const totalScore = Math.round(distScore + simScore + recencyScore);
+          const distMi = (prop.latitude && cLat)
+            ? Math.sqrt(((prop.latitude - cLat) * 69) ** 2 + ((prop.longitude - cLon) * 69 * Math.cos(prop.latitude * Math.PI / 180)) ** 2)
+            : null;
+
+          return {
+            address: addr.line || '--',
+            city: addr.city || null,
+            state: addr.state_code || null,
+            zipCode: addr.postal_code || null,
+            price: c.list_price ?? null,
+            soldPrice: c.last_sold_price ?? null,
+            soldDate: c.last_sold_date || null,
+            bedrooms: desc.beds ?? null,
+            bathrooms: desc.baths ?? null,
+            squareFootage: desc.sqft ?? null,
+            propertyType: desc.type || null,
+            latitude: cLat ?? null,
+            longitude: cLon ?? null,
+            imgSrc: c.primary_photo?.href ?? null,
+            status: c.status || null,
+            distance: distMi != null ? Math.round(distMi * 100) / 100 : null,
+            daysSinceSale: daysSince != null ? Math.round(daysSince) : null,
+            compScore: totalScore,
+            scoreBreakdown: {
+              proximity: Math.round(distScore),
+              similarity: Math.round(simScore),
+              recency: Math.round(recencyScore),
+            },
+          };
+        });
+
+        // Sort by score descending, take top 5
+        scored.sort((a, b) => b.compScore - a.compScore);
+        result.comparables = scored.slice(0, 5);
       } catch (err) {
         console.log('Comparables fetch failed:', err.message);
         result.comparables = [];
